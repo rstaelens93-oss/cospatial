@@ -1,8 +1,14 @@
-import { Router, type IRouter } from "express";
+import { Router } from "express";
 import healthRouter from "./health";
+import aiRouter from "./ai";
+import codeRouter from "./code";
+import chatRouter from "./chat";
 
-const router: IRouter = Router();
+const router = Router();
 
-router.use(healthRouter);
+router.use("/healthz", healthRouter);
+router.use("/ai", aiRouter);
+router.use("/code", codeRouter);
+router.use("/chat", chatRouter);
 
 export default router;

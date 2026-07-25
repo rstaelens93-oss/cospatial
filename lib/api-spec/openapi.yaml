@@ -3,13 +3,19 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Collaborative AI Dashboard API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: ai
+    description: AI concept generation
+  - name: code
+    description: Code execution
+  - name: chat
+    description: Chat messages
 paths:
   /healthz:
     get:
@@ -24,6 +30,97 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /ai/generate:
+    post:
+      operationId: generateConcept
+      tags: [ai]
+      summary: Generate AI concept
+      description: Generates a concept description and image prompt from a text prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConceptInput"
+      responses:
+        "200":
+          description: Generated concept
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Concept"
+
+  /ai/concepts:
+    get:
+      operationId: listConcepts
+      tags: [ai]
+      summary: List recent concepts
+      description: Returns the list of recently generated concepts
+      responses:
+        "200":
+          description: List of concepts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Concept"
+
+  /code/execute:
+    post:
+      operationId: executeCode
+      tags: [code]
+      summary: Execute Python code
+      description: Executes Python code snippet and returns stdout/stderr output
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeInput"
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeResult"
+
+  /chat/messages:
+    get:
+      operationId: listChatMessages
+      tags: [chat]
+      summary: List chat messages
+      description: Returns recent chat messages
+      responses:
+        "200":
+          description: List of chat messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessage"
+    post:
+      operationId: sendChatMessage
+      tags: [chat]
+      summary: Send a chat message
+      description: Sends a new chat message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatMessageInput"
+      responses:
+        "201":
+          description: Created message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatMessage"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +131,87 @@ components:
       required:
         - status
 
+    ConceptInput:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+          minLength: 1
+          description: The text prompt to generate a concept from
+
+    Concept:
+      type: object
+      required: [id, prompt, description, imagePrompt, createdAt]
+      properties:
+        id:
+          type: integer
+        prompt:
+          type: string
+        description:
+          type: string
+          description: Generated concept description
+        imagePrompt:
+          type: string
+          description: Suggested image generation prompt
+        imageUrl:
+          type: ["string", "null"]
+          description: URL of generated image if available
+        createdAt:
+          type: string
+          format: date-time
+
+    CodeInput:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: Python code to execute
+        language:
+          type: string
+          default: python
+          description: Programming language (currently python only)
+
+    CodeResult:
+      type: object
+      required: [success, stdout, stderr, executionTime]
+      properties:
+        success:
+          type: boolean
+        stdout:
+          type: string
+        stderr:
+          type: string
+        executionTime:
+          type: number
+          description: Execution time in milliseconds
+        sceneData:
+          type: ["string", "null"]
+          description: JSON string with 3D scene data if code produces it
+
+    ChatMessageInput:
+      type: object
+      required: [content, author]
+      properties:
+        content:
+          type: string
+          minLength: 1
+        author:
+          type: string
+          minLength: 1
+
+    ChatMessage:
+      type: object
+      required: [id, content, author, createdAt]
+      properties:
+        id:
+          type: integer
+        content:
+          type: string
+        author:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
