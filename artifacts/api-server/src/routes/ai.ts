@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { conceptsTable, insertConceptSchema } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
-import { z } from "zod/v4";
+import { conceptsTable } from "@workspace/db";
+import { desc } from "drizzle-orm";
+import { GenerateConceptBody } from "@workspace/api-zod";
 
 const router = Router();
 
@@ -52,7 +52,7 @@ function generateConcept(prompt: string) {
 
 // POST /api/ai/generate
 router.post("/generate", async (req, res) => {
-  const body = insertConceptSchema.parse(req.body);
+  const body = GenerateConceptBody.parse(req.body);
   const concept = generateConcept(body.prompt);
 
   const [row] = await db.insert(conceptsTable).values({
