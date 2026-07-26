@@ -57,7 +57,21 @@ export default function ChatBox() {
   const [wsMessages, setWsMessages] = useState<MessageItem[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);          // guard: no state updates after cleanup
+  const isExpandedRef = useRef(isExpanded); // stable ref so WS handler sees latest value
   const queryClient = useQueryClient();
+
+  // Keep isExpandedRef in sync so the WS handler sees the latest value
+  // without listing isExpanded as a WebSocket effect dependency.
+  useEffect(() => {
+    isExpandedRef.current = isExpanded;
+  }, [isExpanded]);
+
+  // Track mount state so stale reconnect timers can't call setState after cleanup.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // REST fallback
   const { data: restMessages } = useListChatMessages({
@@ -108,13 +122,20 @@ export default function ChatBox() {
     });
   })();
 
-  // WebSocket setup
+  // WebSocket setup — mounts once only ([]).
+  // isExpandedRef lets the message handler read the latest expanded state
+  // without this effect needing isExpanded as a dependency (which would
+  // recreate the socket every open/close and leak stale reconnect timers).
   useEffect(() => {
-    let ws: WebSocket;
-    let reconnectTimer: ReturnType<typeof setTimeout>;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      setWsStatus("connecting");
+      // Bail out if the component has been unmounted.
+      if (!mountedRef.current) return;
+
+      if (mountedRef.current) setWsStatus("connecting");
+
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = protocol + "//" + window.location.host + "/ws/chat";
 
@@ -123,24 +144,29 @@ export default function ChatBox() {
         wsRef.current = ws;
 
         ws.onopen = () => {
+          if (!mountedRef.current) return;
           setWsStatus("connected");
         };
 
         ws.onmessage = (event) => {
+          if (!mountedRef.current) return;
           try {
-            const msg = JSON.parse(event.data);
+            const msg = JSON.parse(event.data as string);
 
             if (msg.type === "history" && Array.isArray(msg.messages)) {
               setWsMessages((prev) => {
                 const ids = new Set(msg.messages.map((m: ChatMessage) => m.id));
-                const nonHist = prev.filter(
-                  (m) => "kind" in m && (m as SystemEvent).kind === "system" ? true : !ids.has((m as ChatMessage).id)
+                const nonHist = prev.filter((m) =>
+                  "kind" in m && (m as SystemEvent).kind === "system"
+                    ? true
+                    : !ids.has((m as ChatMessage).id)
                 );
                 return [...msg.messages, ...nonHist];
               });
             } else if (msg.type === "message" && msg.message) {
               setWsMessages((prev) => [...prev, msg.message]);
-              if (!isExpanded) {
+              // Use ref so we never capture a stale isExpanded value.
+              if (!isExpandedRef.current) {
                 setUnread((u) => u + 1);
               }
             } else if (msg.type === "code_executing") {
@@ -152,7 +178,7 @@ export default function ChatBox() {
               };
               setWsMessages((prev) => [...prev, sysMsg]);
             } else if (msg.type === "code_result" && msg.result) {
-              const r = msg.result;
+              const r = msg.result as { success: boolean; executionTime: number };
               const sysMsg: SystemEvent = {
                 id: `sys-${Date.now()}`,
                 kind: "system",
@@ -162,32 +188,49 @@ export default function ChatBox() {
               setWsMessages((prev) => [...prev, sysMsg]);
             }
           } catch {
-            // ignore parse errors
+            // ignore JSON parse errors
           }
         };
 
         ws.onclose = () => {
+          if (!mountedRef.current) return;
           setWsStatus("disconnected");
-          reconnectTimer = setTimeout(connect, 4000);
+          // Reconnect after delay — but only if still mounted.
+          reconnectTimer = setTimeout(() => {
+            if (mountedRef.current) connect();
+          }, 4000);
         };
 
         ws.onerror = () => {
-          setWsStatus("disconnected");
-          ws.close();
+          // Don't re-throw — just close; onclose will schedule the reconnect.
+          ws?.close();
         };
       } catch {
+        if (!mountedRef.current) return;
         setWsStatus("disconnected");
-        reconnectTimer = setTimeout(connect, 4000);
+        reconnectTimer = setTimeout(() => {
+          if (mountedRef.current) connect();
+        }, 4000);
       }
     };
 
     connect();
 
     return () => {
-      clearTimeout(reconnectTimer);
-      wsRef.current?.close();
+      // Signal unmount so in-flight timers and handlers are no-ops.
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      const current = wsRef.current;
+      if (current) {
+        // Null out handlers before closing so onclose doesn't queue a reconnect.
+        current.onclose = null;
+        current.onerror = null;
+        current.onmessage = null;
+        current.onopen = null;
+        current.close();
+        wsRef.current = null;
+      }
     };
-  }, [isExpanded]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll
   useEffect(() => {

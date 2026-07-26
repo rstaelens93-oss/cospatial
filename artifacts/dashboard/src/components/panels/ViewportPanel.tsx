@@ -142,32 +142,35 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     const stars = new THREE.Points(starGeo, starMat);
     scene.add(stars);
 
-    // Animation loop
+    // Animation loop — wrapped in try/catch so any THREE.js throw
+    // does NOT escape to window.onerror (which triggers the Vite overlay).
     const animate = () => {
-      animFrameRef.current = requestAnimationFrame(animate);
-      const elapsed = clockRef.current.getElapsedTime();
+      try {
+        animFrameRef.current = requestAnimationFrame(animate);
+        const elapsed = clockRef.current.getElapsedTime();
 
-      // Auto-rotate main group gently
-      if (rotationGroupRef.current) {
-        rotationGroupRef.current.rotation.y = elapsed * 0.15;
+        if (rotationGroupRef.current) {
+          rotationGroupRef.current.rotation.y = elapsed * 0.15;
+        }
+
+        if (pointLightRef.current) {
+          const r = (Math.sin(elapsed * 0.3) * 0.5 + 0.5) * 0.2;
+          const g = (Math.sin(elapsed * 0.2 + 2) * 0.5 + 0.5) * 0.6 + 0.4;
+          const b = 1.0;
+          pointLightRef.current.color.setRGB(r * 0.2, g * 0.5, b);
+          pointLightRef.current.intensity = 3 + Math.sin(elapsed * 0.8) * 1.5;
+        }
+
+        if (defaultMeshRef.current && defaultMeshRef.current.visible) {
+          const s = 1 + Math.sin(elapsed * 1.2) * 0.06;
+          defaultMeshRef.current.scale.setScalar(s);
+        }
+
+        renderer.render(scene, camera);
+      } catch {
+        // Cancel the loop on error to prevent 60×/s window.onerror floods.
+        cancelAnimationFrame(animFrameRef.current);
       }
-
-      // Color-cycle point light
-      if (pointLightRef.current) {
-        const r = (Math.sin(elapsed * 0.3) * 0.5 + 0.5) * 0.2;
-        const g = (Math.sin(elapsed * 0.2 + 2) * 0.5 + 0.5) * 0.6 + 0.4;
-        const b = 1.0;
-        pointLightRef.current.color.setRGB(r * 0.2, g * 0.5, b);
-        pointLightRef.current.intensity = 3 + Math.sin(elapsed * 0.8) * 1.5;
-      }
-
-      // Pulsate default icosahedron
-      if (defaultMeshRef.current && defaultMeshRef.current.visible) {
-        const s = 1 + Math.sin(elapsed * 1.2) * 0.06;
-        defaultMeshRef.current.scale.setScalar(s);
-      }
-
-      renderer.render(scene, camera);
     };
     animate();
 
