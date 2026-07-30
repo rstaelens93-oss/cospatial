@@ -6,6 +6,7 @@ import NotFound from "@/pages/not-found";
 import { Route, Switch, Router as WouterRouter } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import Dashboard from "@/pages/Dashboard";
+import { SplashScreen } from "@capacitor/splash-screen";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,6 +29,10 @@ function Router() {
 function App() {
   useEffect(() => {
     document.documentElement.classList.add("dark");
+    // Dismiss the native splash screen once React has mounted and the
+    // dark-mode class is applied. Wrapped in try/catch so it is a no-op
+    // on web where the Capacitor native bridge is absent.
+    SplashScreen.hide({ fadeOutDuration: 300 }).catch(() => {});
     return () => {
       document.documentElement.classList.remove("dark");
     };

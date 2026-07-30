@@ -1,6 +1,6 @@
 {
   "packageId": "com.cospatial.app",
-  "host": "replit.dev",
+  "host": "collab-workspace-randellstaelens.replit.app",
   "name": "CoSpatial",
   "launcherName": "CoSpatial",
   "display": "standalone",
@@ -12,10 +12,10 @@
   "navigationDividerColorDark": "#0d1b2a",
   "backgroundColor": "#0d1b2a",
   "enableNotifications": false,
-  "startUrl": "https://replit.dev/",
-  "iconUrl": "https://replit.dev/icons/icon-512.png",
-  "maskableIconUrl": "https://replit.dev/icons/icon-512-maskable.png",
-  "monochromeIconUrl": "https://replit.dev/icons/icon-512-mono.png",
+  "startUrl": "https://collab-workspace-randellstaelens.replit.app/",
+  "iconUrl": "https://collab-workspace-randellstaelens.replit.app/icons/icon-512.png",
+  "maskableIconUrl": "https://collab-workspace-randellstaelens.replit.app/icons/icon-512-maskable.png",
+  "monochromeIconUrl": "https://collab-workspace-randellstaelens.replit.app/icons/icon-512-mono.png",
   "splashScreenFadeOutDuration": 300,
   "signingKey": {
     "path": "./android.keystore",
@@ -25,7 +25,7 @@
   "appVersion": "1.0.0",
   "shortcuts": [],
   "generatorApp": "bubblewrap-cli",
-  "webManifestUrl": "https://replit.dev/manifest.webmanifest",
+  "webManifestUrl": "https://collab-workspace-randellstaelens.replit.app/manifest.webmanifest",
   "fallbackType": "customtabs",
   "features": {
     "locationDelegation": {
@@ -41,7 +41,7 @@
   "enableSiteSettingsShortcut": true,
   "isChromeOSOnly": false,
   "isMetaQuest": false,
-  "fullScopeUrl": "https://replit.dev/",
+  "fullScopeUrl": "https://collab-workspace-randellstaelens.replit.app/",
   "minSdkVersion": 19,
   "fingerprints": []
 }
