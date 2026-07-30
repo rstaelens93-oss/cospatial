@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { apiUrl } from "@/lib/endpoints";
 import type { Concept } from "@workspace/api-client-react";
 import ConceptPanel from "@/components/panels/ConceptPanel";
 import PythonPanel from "@/components/panels/PythonPanel";
@@ -97,7 +98,7 @@ export default function Dashboard() {
     setConceptPanelStatus("active");
 
     // Fire-and-forget: fetch the Pollinations image URL for this concept's prompt.
-    fetch("/api/image/generate", {
+    fetch(apiUrl("/api/image/generate"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: concept.prompt }),

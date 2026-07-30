@@ -7,6 +7,7 @@ import {
 } from "@workspace/api-client-react";
 import type { ChatMessage } from "@workspace/api-client-react";
 import { MessageCircle, Minus, Send, Wifi, WifiOff, Terminal } from "lucide-react";
+import { wsUrl as buildWsUrl } from "@/lib/endpoints";
 
 function formatRelTime(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -136,8 +137,7 @@ export default function ChatBox() {
 
       if (mountedRef.current) setWsStatus("connecting");
 
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = protocol + "//" + window.location.host + "/ws/chat";
+      const wsUrl = buildWsUrl("/ws/chat");
 
       try {
         ws = new WebSocket(wsUrl);

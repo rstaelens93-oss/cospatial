@@ -65,6 +65,8 @@ jobs:
           PORT: '3000'
           BASE_PATH: './'
           VITE_USE_HASH_ROUTER: 'true'
+          VITE_API_BASE_URL: 'https://replit.dev'
+          VITE_WS_BASE_URL: 'wss://a4.spock.replit.dev'
           NODE_ENV: production
         run: pnpm run build
 

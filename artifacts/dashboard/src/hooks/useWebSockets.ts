@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage } from "@workspace/api-client-react";
+import { wsUrl } from "@/lib/endpoints";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Seat colors
@@ -194,9 +195,8 @@ export function useWebSocket({
 
       if (mountedRef.current) setStatus("connecting");
 
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const url =
-        `${protocol}//${window.location.host}/ws/chat` +
+        wsUrl("/ws/chat") +
         `?room_id=${encodeURIComponent(roomId)}` +
         `&tier=${encodeURIComponent(tier)}`;
 
