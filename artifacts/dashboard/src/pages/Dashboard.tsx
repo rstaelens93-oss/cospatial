@@ -1,11 +1,11 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { apiUrl } from "@/lib/endpoints";
 import type { Concept } from "@workspace/api-client-react";
 import type { SceneDataPayload } from "@/hooks/useWebSockets";
 import ConceptPanel from "@/components/panels/ConceptPanel";
 import PythonPanel from "@/components/panels/PythonPanel";
 import ImagePanel from "@/components/panels/ImagePanel";
-import ViewportPanel from "@/components/panels/ViewportPanel";
+import ViewportPanel, { type ViewportPanelHandle } from "@/components/panels/ViewportPanel";
 import ChatBox from "@/components/ChatBox";
 import {
   Cpu,
@@ -16,6 +16,7 @@ import {
   Terminal,
   Image,
   Globe,
+  Download,
 } from "lucide-react";
 
 interface PanelHeaderProps {
@@ -23,9 +24,10 @@ interface PanelHeaderProps {
   title: string;
   status?: "active" | "idle" | "processing";
   badge?: string;
+  actions?: React.ReactNode;
 }
 
-function PanelHeader({ icon, title, status = "idle", badge }: PanelHeaderProps) {
+function PanelHeader({ icon, title, status = "idle", badge, actions }: PanelHeaderProps) {
   return (
     <div
       className="flex items-center gap-2 px-3 py-2 flex-shrink-0 relative panel-header-accent"
@@ -65,6 +67,9 @@ function PanelHeader({ icon, title, status = "idle", badge }: PanelHeaderProps) 
         {title}
       </span>
 
+      {/* Optional actions */}
+      {actions}
+
       {/* Optional badge */}
       {badge && (
         <span
@@ -91,6 +96,12 @@ export default function Dashboard() {
   const [sceneData, setSceneData] = useState<string | null>(null);
   const [conceptPanelStatus, setConceptPanelStatus] = useState<"active" | "idle" | "processing">("idle");
   const [pythonPanelStatus, setPythonPanelStatus] = useState<"active" | "idle" | "processing">("idle");
+  const viewportRef = useRef<ViewportPanelHandle>(null);
+
+  // True when the loaded scene contains a point cloud (enables Export PLY button)
+  const hasPointCloud = sceneData
+    ? (() => { try { return JSON.parse(sceneData).type === "points"; } catch { return false; } })()
+    : false;
 
   const handleConceptGenerated = useCallback((concept: Concept) => {
     setLatestConcept(concept);
@@ -348,9 +359,44 @@ export default function Dashboard() {
             title="3D Viewport"
             status={sceneData ? "active" : "idle"}
             badge="THREE.JS"
+            actions={
+              hasPointCloud ? (
+                <button
+                  onClick={() => viewportRef.current?.exportPLY()}
+                  title="Download scene.ply"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    padding: "2px 8px",
+                    borderRadius: "4px",
+                    border: "1px solid rgba(0, 212, 255, 0.3)",
+                    background: "rgba(0, 212, 255, 0.07)",
+                    color: "rgba(0, 212, 255, 0.8)",
+                    fontFamily: "var(--app-font-mono)",
+                    fontSize: "10px",
+                    letterSpacing: "0.06em",
+                    cursor: "pointer",
+                    flexShrink: 0,
+                    transition: "background 0.15s, border-color 0.15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.background = "rgba(0, 212, 255, 0.15)";
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(0, 212, 255, 0.55)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.background = "rgba(0, 212, 255, 0.07)";
+                    (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(0, 212, 255, 0.3)";
+                  }}
+                >
+                  <Download size={9} />
+                  EXPORT PLY
+                </button>
+              ) : null
+            }
           />
           <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-            <ViewportPanel sceneData={sceneData} />
+            <ViewportPanel ref={viewportRef} sceneData={sceneData} />
           </div>
         </div>
       </main>

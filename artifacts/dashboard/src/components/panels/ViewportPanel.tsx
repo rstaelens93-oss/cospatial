@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useState, forwardRef, useImperativeHandle } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
@@ -23,7 +23,12 @@ interface ViewportPanelProps {
   sceneData: string | null;
 }
 
-export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
+export interface ViewportPanelHandle {
+  exportPLY: () => void;
+}
+
+const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
+  function ViewportPanel({ sceneData }: ViewportPanelProps, ref) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [webglError, setWebglError] = useState<string | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -36,6 +41,67 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
   const pointLightRef = useRef<THREE.PointLight | null>(null);
   const customObjectsRef = useRef<THREE.Object3D[]>([]);
   const clockRef = useRef(new THREE.Timer());
+
+  // Expose exportPLY to parent via ref
+  useImperativeHandle(ref, () => ({
+    exportPLY() {
+      const pointObjects = customObjectsRef.current.filter(
+        (o) => o instanceof THREE.Points
+      ) as THREE.Points[];
+
+      if (pointObjects.length === 0) return;
+
+      const allPositions: number[] = [];
+      const allColors: number[] = [];
+      let hasColors = false;
+
+      for (const pts of pointObjects) {
+        const geo = pts.geometry;
+        const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+        const col = geo.getAttribute("color") as THREE.BufferAttribute | undefined;
+        const matColor = (pts.material as THREE.PointsMaterial).color;
+
+        for (let i = 0; i < pos.count; i++) {
+          allPositions.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+          if (col) {
+            hasColors = true;
+            allColors.push(
+              Math.round(col.getX(i) * 255),
+              Math.round(col.getY(i) * 255),
+              Math.round(col.getZ(i) * 255)
+            );
+          } else {
+            allColors.push(
+              Math.round(matColor.r * 255),
+              Math.round(matColor.g * 255),
+              Math.round(matColor.b * 255)
+            );
+          }
+        }
+      }
+
+      const count = allPositions.length / 3;
+      let ply =
+        `ply\nformat ascii 1.0\nelement vertex ${count}\n` +
+        `property float x\nproperty float y\nproperty float z\n` +
+        `property uchar red\nproperty uchar green\nproperty uchar blue\n` +
+        `end_header\n`;
+
+      for (let i = 0; i < count; i++) {
+        ply +=
+          `${allPositions[i * 3]} ${allPositions[i * 3 + 1]} ${allPositions[i * 3 + 2]} ` +
+          `${allColors[i * 3]} ${allColors[i * 3 + 1]} ${allColors[i * 3 + 2]}\n`;
+      }
+
+      const blob = new Blob([ply], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "scene.ply";
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+  }), []);
 
   const initScene = useCallback(() => {
     if (!mountRef.current) return;
@@ -358,4 +424,6 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
       }}
     />
   );
-}
+});
+
+export default ViewportPanel;
