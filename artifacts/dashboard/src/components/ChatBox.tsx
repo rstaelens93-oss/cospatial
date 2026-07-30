@@ -8,6 +8,7 @@ import {
 import type { ChatMessage } from "@workspace/api-client-react";
 import { MessageCircle, Minus, Send, Wifi, WifiOff, Terminal } from "lucide-react";
 import { wsUrl as buildWsUrl } from "@/lib/endpoints";
+import type { SceneDataPayload } from "@/hooks/useWebSockets";
 
 function formatRelTime(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -47,7 +48,13 @@ interface SystemEvent {
 
 type MessageItem = ChatMessage | SystemEvent;
 
-export default function ChatBox() {
+interface ChatBoxProps {
+  /** Called whenever the backend broadcasts an image_scene frame with a
+   *  parsed SceneDataPayload so the dashboard can forward it to the viewport. */
+  onSceneData?: (data: SceneDataPayload) => void;
+}
+
+export default function ChatBox({ onSceneData }: ChatBoxProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [unread, setUnread] = useState(0);
   const [input, setInput] = useState("");
@@ -60,6 +67,10 @@ export default function ChatBox() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);          // guard: no state updates after cleanup
   const isExpandedRef = useRef(isExpanded); // stable ref so WS handler sees latest value
+  // Stable ref so the WS handler always sees the latest callback without
+  // being listed as an effect dependency (which would recreate the socket).
+  const onSceneDataRef = useRef(onSceneData);
+  useEffect(() => { onSceneDataRef.current = onSceneData; }, [onSceneData]);
   const queryClient = useQueryClient();
 
   // Keep isExpandedRef in sync so the WS handler sees the latest value
@@ -186,6 +197,22 @@ export default function ChatBox() {
                 createdAt: new Date().toISOString(),
               };
               setWsMessages((prev) => [...prev, sysMsg]);
+            } else if (msg.type === "image_scene" && typeof msg.sceneData === "string") {
+              // Backend finished extracting the 2D→3D point cloud from the
+              // generated image — forward parsed payload to the viewport.
+              try {
+                const parsed = JSON.parse(msg.sceneData) as SceneDataPayload;
+                onSceneDataRef.current?.(parsed);
+                const sysMsg: SystemEvent = {
+                  id: `sys-${Date.now()}`,
+                  kind: "system",
+                  content: `Image → 3D: ${(msg.pointCount as number) ?? "?"} points materialised in viewport (${msg.executionTime}ms)`,
+                  createdAt: new Date().toISOString(),
+                };
+                setWsMessages((prev) => [...prev, sysMsg]);
+              } catch {
+                // malformed payload — discard silently
+              }
             }
           } catch {
             // ignore JSON parse errors

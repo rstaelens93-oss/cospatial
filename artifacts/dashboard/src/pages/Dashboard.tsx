@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { apiUrl } from "@/lib/endpoints";
 import type { Concept } from "@workspace/api-client-react";
+import type { SceneDataPayload } from "@/hooks/useWebSockets";
 import ConceptPanel from "@/components/panels/ConceptPanel";
 import PythonPanel from "@/components/panels/PythonPanel";
 import ImagePanel from "@/components/panels/ImagePanel";
@@ -115,10 +116,17 @@ export default function Dashboard() {
       });
   }, []);
 
+  // Python panel → viewport (HTTP path: result.sceneData is already a string)
   const handleSceneData = (data: string) => {
     setSceneData(data);
     setPythonPanelStatus("active");
   };
+
+  // WebSocket path: image_scene frame → viewport (data is already parsed object)
+  const handleWsSceneData = useCallback((data: SceneDataPayload) => {
+    setSceneData(JSON.stringify(data));
+    setPythonPanelStatus("active");
+  }, []);
 
   // Merge the live Pollinations URL into the concept object ImagePanel receives.
   const displayConcept = latestConcept
@@ -347,8 +355,8 @@ export default function Dashboard() {
         </div>
       </main>
 
-      {/* ── Floating chat box ── */}
-      <ChatBox />
+      {/* ── Floating chat box — also relays image_scene WS frames to viewport ── */}
+      <ChatBox onSceneData={handleWsSceneData} />
     </div>
   );
 }

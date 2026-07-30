@@ -16,6 +16,7 @@ WebSocket capacity by tier:
 """
 
 import asyncio
+import io
 import json
 import os
 import subprocess
@@ -23,8 +24,16 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import urllib.request
 from collections import defaultdict, deque
 from typing import Any, Generator, Optional
+
+try:
+    from PIL import Image as _PILImage
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PILImage = None  # type: ignore[assignment]
+    _PIL_AVAILABLE = False
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -288,25 +297,114 @@ async def generate_concept(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Image → 3D point-cloud pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
+    """
+    Synchronous helper (runs in a thread-pool executor).
+
+    Fetches the rendered Pollinations image, resamples it onto a 48×30 grid,
+    and converts each non-background pixel into a spatial point:
+      x  — horizontal position  (-2.4 … 2.4)
+      y  — vertical position    ( 1.5 … -1.5, image top → positive y)
+      z  — luminance-based depth (-1.0 … 1.0, bright pixels pop forward)
+      color — exact "#rrggbb" hex sampled from the pixel
+
+    Near-white pixels (r,g,b all > 238) are treated as background and
+    skipped so the point cloud shows the subject rather than the canvas.
+
+    Returns an empty list when PIL is unavailable or the fetch fails.
+    """
+    if not _PIL_AVAILABLE:
+        return []
+
+    GRID_W, GRID_H = 48, 30
+
+    try:
+        req = urllib.request.Request(
+            image_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CospaSpatial/1.0)"},
+        )
+        with urllib.request.urlopen(req, timeout=35) as resp:
+            raw_bytes = resp.read()
+
+        img = _PILImage.open(io.BytesIO(raw_bytes)).convert("RGB")
+        img = img.resize((GRID_W, GRID_H), _PILImage.LANCZOS)
+        px = img.load()
+
+        points: list[dict[str, Any]] = []
+        for row in range(GRID_H):
+            for col in range(GRID_W):
+                r, g, b = px[col, row]
+                # Skip near-white background
+                if r > 238 and g > 238 and b > 238:
+                    continue
+                luma: float = 0.299 * r + 0.587 * g + 0.114 * b
+                x: float = round((col / (GRID_W - 1) - 0.5) * 4.8, 4)
+                y: float = round((0.5 - row / (GRID_H - 1)) * 3.0, 4)
+                z: float = round((luma / 255.0) * 2.0 - 1.0, 4)
+                color: str = f"#{r:02x}{g:02x}{b:02x}"
+                points.append({"x": x, "y": y, "z": z, "color": color})
+
+        return points
+
+    except Exception:
+        return []
+
+
+async def _process_image_to_scene(image_url: str, room_id: str = "global") -> None:
+    """
+    Background async task: fetch → extract → broadcast.
+
+    Fires after the HTTP response is already sent so the caller sees zero
+    added latency. Fails completely silently — this is a best-effort
+    enhancement and must never surface errors to the user.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        t0 = time.perf_counter()
+        points = await loop.run_in_executor(None, _image_to_pointcloud, image_url)
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+        if not points:
+            return
+
+        scene_json = json.dumps({"type": "points", "points": points})
+        await manager.broadcast_to_room(
+            room_id,
+            {
+                "type": "image_scene",
+                "sceneData": scene_json,
+                "pointCount": len(points),
+                "executionTime": elapsed_ms,
+            },
+        )
+    except Exception:
+        pass  # background task – never propagate
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Image generation endpoint  (Pollinations.ai – no API key required)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/python-api/generate-image")
 async def generate_image(request: Request) -> dict:
     """
-    Return a Pollinations.ai image URL for the given prompt.
-
-    The URL itself is the image – Pollinations renders on first GET so the
-    frontend can drop it straight into an <img> src without any extra fetch.
+    Return a Pollinations.ai image URL for the given prompt, then kick off a
+    background task that fetches the rendered image, extracts a luminance-
+    depth point cloud, and broadcasts it as an ``image_scene`` WebSocket
+    frame so the Three.js viewport materialises the 2D image as a 3D model.
 
     Request body  (JSON):
-      { "prompt": "<text describing the image>" }
+      { "prompt": "<text>", "room_id": "<room>" }   (room_id defaults to "global")
 
-    Response:
+    Response (immediate, before the background task completes):
       { "imageUrl": "https://image.pollinations.ai/prompt/<encoded>?..." }
     """
     body: dict = await request.json()
     raw_prompt: str = body.get("prompt", "").strip()
+    room_id: str = body.get("room_id", "global")
 
     if not raw_prompt:
         raise HTTPException(status_code=400, detail="'prompt' is required.")
@@ -320,6 +418,11 @@ async def generate_image(request: Request) -> dict:
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
         "?width=1024&height=1024&nologo=true"
     )
+
+    # Fire-and-forget: fetch + extract + broadcast runs after we respond.
+    # Pollinations renders the image on first GET, so the background task
+    # uses the same URL the frontend will display in <img src=...>.
+    asyncio.create_task(_process_image_to_scene(image_url, room_id))
 
     return {"imageUrl": image_url}
 

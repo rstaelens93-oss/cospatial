@@ -6,6 +6,9 @@ interface ScenePoint {
   x: number;
   y: number;
   z: number;
+  /** Per-point hex color e.g. "#ff6600". When present on ≥1 point, vertex
+   *  colors are used so image-derived point clouds render with true pixel hues. */
+  color?: string;
 }
 
 interface SceneData {
@@ -246,19 +249,36 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     }
 
     if (parsed.type === "points" && parsed.points) {
-      const positions = new Float32Array(parsed.points.length * 3);
+      const count = parsed.points.length;
+      const positions = new Float32Array(count * 3);
+      const colorsBuf = new Float32Array(count * 3);
+      let hasVertexColors = false;
+
       parsed.points.forEach((p, i) => {
         positions[i * 3]     = p.x;
         positions[i * 3 + 1] = p.y;
         positions[i * 3 + 2] = p.z;
+        if (p.color) {
+          const c = new THREE.Color(p.color);
+          colorsBuf[i * 3]     = c.r;
+          colorsBuf[i * 3 + 1] = c.g;
+          colorsBuf[i * 3 + 2] = c.b;
+          hasVertexColors = true;
+        }
       });
 
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      if (hasVertexColors) {
+        geo.setAttribute("color", new THREE.BufferAttribute(colorsBuf, 3));
+      }
 
       const mat = new THREE.PointsMaterial({
-        color: new THREE.Color(parsed.color ?? "#00ffcc"),
-        size: 0.08,
+        // Per-point colors when available (image-derived clouds); fall back to
+        // the top-level palette color for single-color Python-generated clouds.
+        color: hasVertexColors ? 0xffffff : new THREE.Color(parsed.color ?? "#00ffcc"),
+        vertexColors: hasVertexColors,
+        size: hasVertexColors ? 0.14 : 0.08,
         sizeAttenuation: true,
       });
 
