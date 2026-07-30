@@ -557,6 +557,37 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
             if row == GRID_H - 1 or (row + 1, col) not in surf_idx:
                 faces.extend([t0, b0, b1,  t0, b1, t1])
 
+    # ── Bounding-box normalisation ────────────────────────────────────────
+    # Fit the final mesh into a well-proportioned bounding volume:
+    #   • XY axes scaled uniformly so the widest axis fills [-2.0, +2.0].
+    #   • Z axis scaled independently so depth ≤ 12 % of XY width,
+    #     preventing the depth-displacement from stretching the model.
+    # All coordinates are re-centred at the origin first.
+    TARGET   = 2.0          # half-extent target on each axis
+    Z_PCT    = 0.12         # max Z depth as fraction of normalised XY span
+
+    xs = verts[0::3]
+    ys = verts[1::3]
+    zs = verts[2::3]
+
+    x_ctr = (max(xs) + min(xs)) / 2.0
+    y_ctr = (max(ys) + min(ys)) / 2.0
+    z_ctr = (max(zs) + min(zs)) / 2.0
+
+    xy_half   = max((max(xs) - min(xs)) / 2.0,
+                    (max(ys) - min(ys)) / 2.0,
+                    1e-6)
+    xy_scale  = TARGET / xy_half               # maps largest XY axis → ±2.0
+
+    z_raw_half   = max((max(zs) - min(zs)) / 2.0, 1e-6)
+    z_max_half   = TARGET * 2.0 * Z_PCT        # 12 % of 4.0 = 0.48 → ±0.24
+    z_scale      = min(z_max_half / z_raw_half, xy_scale)  # never exceed XY scale
+
+    for i in range(len(verts) // 3):
+        verts[i * 3]     = round((verts[i * 3]     - x_ctr) * xy_scale, 3)
+        verts[i * 3 + 1] = round((verts[i * 3 + 1] - y_ctr) * xy_scale, 3)
+        verts[i * 3 + 2] = round((verts[i * 3 + 2] - z_ctr) * z_scale,  3)
+
     return {"type": "mesh", "vertices": verts, "faces": faces, "colors": colors}
 
 
