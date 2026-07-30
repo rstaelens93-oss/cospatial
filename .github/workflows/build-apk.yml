@@ -10,14 +10,14 @@ on:
       - 'twa-manifest.json'
       - 'android/**'
       - '.github/workflows/build-apk.yml'
-  workflow_dispatch:            # manual "Run workflow" button in the Actions tab
+  workflow_dispatch:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Optional GitHub Secrets (Settings → Secrets → Actions)
-#   KEYSTORE_BASE64      base64-encoded production keystore  (openssl base64 -in android.keystore)
-#   KEYSTORE_PASSWORD    keystore password  (defaults to "cospatial" for debug builds)
-#   KEY_PASSWORD         key password       (defaults to "cospatial" for debug builds)
-# Without these secrets the workflow generates a fresh debug keystore automatically.
+#   KEYSTORE_BASE64      base64-encoded production keystore
+#   KEYSTORE_PASSWORD    keystore password  (default: "cospatial")
+#   KEY_PASSWORD         key password       (default: "cospatial")
+# Without these secrets the workflow generates a debug keystore automatically.
 # ──────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -43,10 +43,7 @@ jobs:
         with:
           node-version: '20'
 
-      # ── 4. Android SDK (clean, bubblewrap-compatible layout) ─────────────────
-      #  android-actions/setup-android installs a fresh SDK and exports
-      #  ANDROID_SDK_ROOT with the standard directory tree that bubblewrap
-      #  validates against (build-tools/, platform-tools/, platforms/, etc.).
+      # ── 4. Android SDK ───────────────────────────────────────────────────────
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -70,17 +67,22 @@ jobs:
             "$JAVA_HOME" \
             "$ANDROID_SDK_ROOT" \
             > ~/.bubblewrap/config.json
-          echo "=== Bubblewrap config ==="
-          cat ~/.bubblewrap/config.json
-          echo "=== SDK root contents ==="
-          ls "$ANDROID_SDK_ROOT"
+          echo "=== Bubblewrap config ===" && cat ~/.bubblewrap/config.json
+          echo "=== SDK root ===" && ls "$ANDROID_SDK_ROOT"
 
-      # ── 6. Signing keystore ──────────────────────────────────────────────────
+      # ── 6. Generate Android Gradle project (non-interactive) ─────────────────
+      #  --yes accepts all prompts; --skipPwaValidation skips the live-URL check.
+      #  This also writes the checksum file that prevents the "regenerate?" prompt
+      #  from firing during the build step.
+      - name: Init Android project with bubblewrap
+        run: bubblewrap init --yes --skipPwaValidation
+
+      # ── 7. Signing keystore ──────────────────────────────────────────────────
       - name: Provision signing keystore
         env:
-          KEYSTORE_BASE64:    ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD:  ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASSWORD:       ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_BASE64:   ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
         run: |
           KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
           KEY_PASS="${KEY_PASSWORD:-cospatial}"
@@ -98,8 +100,7 @@ jobs:
               -validity 10000 \
               -storepass "$KS_PASS" \
               -keypass   "$KEY_PASS" \
-              -dname     "CN=CoSpatial, OU=Engineering, O=CoSpatial Inc, L=San Francisco, ST=CA, C=US" \
-              2>&1
+              -dname     "CN=CoSpatial, OU=Engineering, O=CoSpatial Inc, L=San Francisco, ST=CA, C=US"
           fi
 
           keytool -list -keystore android.keystore \
@@ -107,18 +108,29 @@ jobs:
             -storepass "$KS_PASS" \
             -noprompt
 
-      # ── 7. Build ─────────────────────────────────────────────────────────────
-      - name: Build APK with bubblewrap
+      # ── 8. Build APK via Gradle (fully non-interactive) ──────────────────────
+      #  bubblewrap init generates android/gradlew; we invoke Gradle directly so
+      #  no TTY / inquirer prompts can block the runner.  Signing params are
+      #  passed as -P flags — no interactive input required.
+      - name: Build release APK with Gradle
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
         run: |
           KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
           KEY_PASS="${KEY_PASSWORD:-cospatial}"
-          printf '%s\n%s\n' "$KS_PASS" "$KEY_PASS" \
-            | bubblewrap build --skipPwaValidation
 
-      # ── 8. Locate & stage the APK ────────────────────────────────────────────
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/android.keystore" \
+            -Pandroid.injected.signing.store.password="$KS_PASS" \
+            -Pandroid.injected.signing.key.alias=cospatial \
+            -Pandroid.injected.signing.key.password="$KEY_PASS" \
+            --no-daemon \
+            --stacktrace
+
+      # ── 9. Locate & stage the APK ────────────────────────────────────────────
       - name: Stage CoSpatial.apk
         run: |
           APK=$(find android/app/build/outputs/apk/release \
@@ -131,7 +143,7 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "❌ No signed APK found. Listing build output:"
-            find android/app/build -name "*.apk" 2>/dev/null || true
+            find android/app/build -name "*.apk" 2>/dev/null || echo "(no apk output)"
             exit 1
           fi
 
@@ -139,7 +151,7 @@ jobs:
           cp "$APK" CoSpatial.apk
           ls -lh CoSpatial.apk
 
-      # ── 9. Upload artifact ───────────────────────────────────────────────────
+      # ── 10. Upload artifact ──────────────────────────────────────────────────
       - name: Upload CoSpatial.apk
         uses: actions/upload-artifact@v4
         with:
@@ -148,7 +160,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # ── 10. Summary ──────────────────────────────────────────────────────────
+      # ── 11. Summary ──────────────────────────────────────────────────────────
       - name: Build summary
         run: |
           echo "## ✅ CoSpatial APK built" >> $GITHUB_STEP_SUMMARY
@@ -157,7 +169,6 @@ jobs:
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Package | \`com.cospatial.app\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`1.0.0\` (code 1) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Target URL | \`https://replit.dev/\` |" >> $GITHUB_STEP_SUMMARY
           SIZE=$(du -h CoSpatial.apk | cut -f1)
           echo "| APK size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
