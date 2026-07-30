@@ -55,10 +55,17 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     camera.position.set(0, 0, 6);
     cameraRef.current = camera;
 
-    // Renderer — guard against environments where WebGL is unavailable
+    // Renderer — guard against environments where WebGL is unavailable.
+    // preserveDrawingBuffer: true ensures the canvas pixel data is retained
+    // between frames so the last rendered image stays visible even when the
+    // RAF loop yields (e.g. tab backgrounded, first frame after sceneData load).
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+        preserveDrawingBuffer: true,
+      });
     } catch {
       setWebglError("WebGL is not available in this environment.");
       return;
@@ -306,6 +313,14 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
       const mesh = new THREE.Mesh(geo, mat);
       userGroupRef.current.add(mesh);
       customObjectsRef.current.push(mesh);
+    }
+
+    // Force an immediate render so the new geometry appears on the very next
+    // paint — without this the canvas stays dark until the RAF loop happens
+    // to fire, which can be up to one frame late or completely miss when the
+    // tab is backgrounded.
+    if (rendererRef.current && sceneRef.current && cameraRef.current) {
+      rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
   }, [sceneData]);
 
