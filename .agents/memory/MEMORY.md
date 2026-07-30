@@ -1,0 +1,3 @@
+- [Volumetric point cloud algorithm](volumetric-points.md) — geometric hemisphere projection replaces mesh/Meshy; lenticular shape from radial distance to foreground centroid.
+- [DB create_all crash fix](db-startup-fix.md) — UniqueViolation on pg_type at startup; wrap create_all in try/except with checkfirst=True.
+- [Dead code removal pattern](dead-code-removal.md) — for large multi-function excisions, use a Python splice script (ShellExec) instead of chained Edit calls.
