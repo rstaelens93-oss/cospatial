@@ -340,47 +340,89 @@ def _make_fallback_points() -> list[dict[str, Any]]:
     return points
 
 
+def _flood_fill_fg_mask(
+    px: Any, gw: int, gh: int, threshold: int = 35
+) -> list[list[bool]]:
+    """
+    BFS flood-fill from the 4 corner pixels to identify background.
+
+    Seeds from all four corners, growing to 4-connected neighbours whose
+    colour is within ``threshold`` (per-channel Euclidean) of the average
+    corner colour.  Returns ``fg[row][col] = True`` for foreground pixels.
+
+    Works well for Pollinations images whose backgrounds are solid or
+    near-white / soft-gradient — the typical case for AI concept art.
+    Falls back gracefully: if the corners land on a non-white subject the
+    threshold won't propagate far and most pixels remain foreground.
+    """
+    corner_coords = [(0, 0), (gw - 1, 0), (0, gh - 1), (gw - 1, gh - 1)]
+    sr, sg, sb = 0, 0, 0
+    for cx, cy in corner_coords:
+        try:
+            r, g, b = px[cx, cy]
+        except Exception:
+            r, g, b = 255, 255, 255
+        sr += r; sg += g; sb += b
+    sr //= 4; sg //= 4; sb //= 4
+
+    thr_sq = threshold * threshold * 3   # sum of squared per-channel deltas
+
+    is_bg  = [[False] * gw for _ in range(gh)]
+    visited = [[False] * gw for _ in range(gh)]
+    queue: list[tuple[int, int]] = []
+
+    for cx, cy in corner_coords:
+        if not visited[cy][cx]:
+            is_bg[cy][cx] = visited[cy][cx] = True
+            queue.append((cx, cy))
+
+    head = 0
+    while head < len(queue):
+        x, y = queue[head]; head += 1
+        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < gw and 0 <= ny < gh and not visited[ny][nx]:
+                visited[ny][nx] = True
+                try:
+                    r, g, b = px[nx, ny]
+                except Exception:
+                    continue
+                if (r - sr) ** 2 + (g - sg) ** 2 + (b - sb) ** 2 <= thr_sq:
+                    is_bg[ny][nx] = True
+                    queue.append((nx, ny))
+
+    return [[not is_bg[row][col] for col in range(gw)] for row in range(gh)]
+
+
 def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     """
     Synchronous helper (runs in a thread-pool executor).
 
     Converts the rendered Pollinations image into a **solid closed 3D mesh**
-    using luminance-to-depth heightmap displacement:
+    of the main subject only — background pixels are excluded entirely.
 
-    Geometry
+    Pipeline
     --------
-    • Top surface  : GRID_W × GRID_H vertices (64×40 = 2 560 surface points).
-                     Depth is driven by an inverted-luma + saturation blend
-                     so subject content protrudes toward the camera while the
-                     white/neutral background recedes:
-                         depth = 0.6 × (1 − luma/255) + 0.4 × saturation
-                     This ensures coloured, textured pixels (the monkey,
-                     the bike, etc.) are always the highest points of the
-                     mesh regardless of their absolute brightness.
-    • Bottom plate : same XY grid at a fixed z_bottom (-2.8), creating a
-                     flat floor that seals the solid from below.
-    • 4 side walls : front/back/left/right connect each surface edge to
-                     the bottom, forming a fully closed solid manifold.
+    1. Fetch + resize to GRID_W × GRID_H.
+    2. BFS flood-fill from the 4 corners to build a foreground mask that
+       isolates the main subject (works well for AI concept art with white
+       or soft-gradient backgrounds).  Falls back to the full grid if fewer
+       than 10 % of pixels are detected as foreground (robust against edge
+       cases where the subject touches all corners).
+    3. Remap vertex indices — only foreground pixels become vertices so the
+       output mesh contains zero background geometry.
+    4. Depth driver per foreground vertex:
+           depth = 0.6 × (1 − luma) + 0.4 × saturation
+       Subject colour and dark edges protrude forward; no white floor.
+    5. Bottom plate + boundary walls are added only for foreground cells,
+       sealing the subject into a fully closed solid manifold.
 
-    Each quad (top, bottom, walls) is triangulated into 2 CCW triangles.
-    `THREE.DoubleSide` material makes winding order irrelevant for display.
-
-    Colors
-    ------
-    Top vertices carry the original pixel RGB packed as a single integer
-    `(r<<16 | g<<8 | b)`.  Bottom/wall vertices carry a 25%-darkened
-    version of the nearest surface pixel.  The frontend unpacks these into
-    a per-vertex color `BufferAttribute`.
-
-    Returns
-    -------
-    dict with keys ``type``, ``vertices``, ``faces``, ``colors``, or
-    ``None`` when the image is unavailable / not yet rendered by Pollinations
-    (caller should retry).
+    Colors: packed (r<<16|g<<8|b); frontend unpacks to BufferAttribute.
+    Returns None when the image is unavailable / not yet rendered.
     """
     GRID_W, GRID_H = 64, 40
-    Z_SCALE  = 4.0   # surface z range: [-2.0, +2.0]
-    Z_BOTTOM = -2.8  # flat bottom plate, below all surface geometry
+    Z_SCALE  = 4.0   # surface z range: [−2.0, +2.0]
+    Z_BOTTOM = -2.8  # bottom plate z
 
     if not _PIL_AVAILABLE:
         return None
@@ -407,8 +449,6 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
         return None
 
     # ── Sample pixel grid ─────────────────────────────────────────────────
-    # surface_rgb[row][col] = (r, g, b)  — sampled once, used for both
-    # surface vertices and darkened bottom/wall vertices.
     surface_rgb: list[list[tuple[int, int, int]]] = []
     for row in range(GRID_H):
         row_rgb: list[tuple[int, int, int]] = []
@@ -419,103 +459,103 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
                 row_rgb.append((100, 100, 120))
         surface_rgb.append(row_rgb)
 
-    # ── Build vertex + color arrays ───────────────────────────────────────
-    # Layout:
-    #   indices 0 .. N_SURFACE-1        — top surface vertices
-    #   indices N_SURFACE .. 2*N-1      — bottom plate vertices
-    N_SURFACE = GRID_W * GRID_H
-    OFF       = N_SURFACE  # bottom layer index offset
+    # ── Foreground mask ───────────────────────────────────────────────────
+    fg = _flood_fill_fg_mask(px, GRID_W, GRID_H, threshold=35)
 
-    verts:  list[float] = []
-    colors: list[int]   = []
+    # Fallback: if fewer than 10 % of pixels are foreground, the corners
+    # probably landed on the subject — disable masking for this image.
+    fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
+    if fg_count < GRID_W * GRID_H * 0.10:
+        fg = [[True] * GRID_W for _ in range(GRID_H)]
 
-    # Top surface
+    # ── Build foreground-only vertex arrays (remapped indices) ─────────────
+    # surf_idx[(row,col)] → new vertex index  (top surface, fg only)
+    # bot_idx [(row,col)] → new vertex index  (bottom plate, fg only)
+    verts:    list[float] = []
+    colors:   list[int]   = []
+    surf_idx: dict[tuple[int, int], int] = {}
+    bot_idx:  dict[tuple[int, int], int] = {}
+
     for row in range(GRID_H):
         for col in range(GRID_W):
+            if not fg[row][col]:
+                continue
             r, g, b = surface_rgb[row][col]
             r_f, g_f, b_f = r / 255.0, g / 255.0, b / 255.0
-            luma = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
-
-            # Colour saturation (HSV S component, 0=grey, 1=fully saturated)
-            cmax = max(r_f, g_f, b_f)
-            cmin = min(r_f, g_f, b_f)
-            saturation = (cmax - cmin) / cmax if cmax > 1e-6 else 0.0
-
-            # Depth driver: subject content (dark edges + saturated colour)
-            # protrudes toward the camera; white/neutral background recedes.
-            #   inv_luma = 1 for black, 0 for white
-            #   saturation = 0 for grey/white, 1 for vivid colour
-            depth = 0.6 * (1.0 - luma) + 0.4 * saturation
+            luma  = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+            cmax  = max(r_f, g_f, b_f)
+            cmin  = min(r_f, g_f, b_f)
+            sat   = (cmax - cmin) / cmax if cmax > 1e-6 else 0.0
+            depth = 0.6 * (1.0 - luma) + 0.4 * sat
             x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
             y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
             z = round(depth * Z_SCALE - Z_SCALE / 2.0, 3)
+            surf_idx[(row, col)] = len(verts) // 3
             verts.extend([x, y, z])
             colors.append((r << 16) | (g << 8) | b)
 
-    # Bottom plate (same XY, fixed z, darkened color)
     for row in range(GRID_H):
         for col in range(GRID_W):
+            if not fg[row][col]:
+                continue
             r, g, b = surface_rgb[row][col]
             x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
             y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
+            bot_idx[(row, col)] = len(verts) // 3
             verts.extend([x, y, Z_BOTTOM])
-            dr, dg, db = r >> 2, g >> 2, b >> 2  # darken to 25 %
+            dr, dg, db = r >> 2, g >> 2, b >> 2   # 25 % darkened
             colors.append((dr << 16) | (dg << 8) | db)
+
+    if not verts:
+        return None   # nothing to render
 
     # ── Build face index array ────────────────────────────────────────────
     faces: list[int] = []
 
-    def _quad(a: int, b_: int, c: int, d: int, reverse: bool = False) -> None:
-        """Append 2 CCW triangles for quad (a, b, c, d)."""
-        if reverse:
-            faces.extend([a, c, b_,  a, d, c])
-        else:
-            faces.extend([a, b_, c,  a, c, d])
-
-    # Top surface quads
+    # Top surface: only quads where all 4 corners are foreground
     for row in range(GRID_H - 1):
         for col in range(GRID_W - 1):
-            v00 = row * GRID_W + col
-            v10 = row * GRID_W + (col + 1)
-            v01 = (row + 1) * GRID_W + col
-            v11 = (row + 1) * GRID_W + (col + 1)
-            _quad(v00, v10, v11, v01)
+            rc = [(row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1)]
+            if all(k in surf_idx for k in rc):
+                v00, v10, v01, v11 = (surf_idx[k] for k in rc)
+                faces.extend([v00, v10, v11,  v00, v11, v01])
 
-    # Bottom plate quads (reversed winding to face downward)
+    # Bottom plate: same quads, reversed winding (faces downward)
     for row in range(GRID_H - 1):
         for col in range(GRID_W - 1):
-            b00 = OFF + row * GRID_W + col
-            b10 = OFF + row * GRID_W + (col + 1)
-            b01 = OFF + (row + 1) * GRID_W + col
-            b11 = OFF + (row + 1) * GRID_W + (col + 1)
-            _quad(b00, b10, b11, b01, reverse=True)
+            rc = [(row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1)]
+            if all(k in bot_idx for k in rc):
+                b00, b10, b01, b11 = (bot_idx[k] for k in rc)
+                faces.extend([b00, b11, b10,  b00, b01, b11])
 
-    # Front wall (row = 0, y = +1.5)
-    for col in range(GRID_W - 1):
-        t0, t1 = col, col + 1
-        b0, b1 = OFF + col, OFF + col + 1
-        _quad(t0, t1, b1, b0)
-
-    # Back wall (row = GRID_H-1, y = -1.5)
-    for col in range(GRID_W - 1):
-        base = (GRID_H - 1) * GRID_W
-        t0, t1 = base + col, base + col + 1
-        b0, b1 = OFF + base + col, OFF + base + col + 1
-        _quad(t0, b0, b1, t1)
-
-    # Left wall (col = 0)
+    # Boundary walls: seal the subject's silhouette edge to the bottom plate.
+    # A wall segment is needed wherever a foreground vertex-pair borders a
+    # background cell (or the image edge).
     for row in range(GRID_H - 1):
-        t0, t1 = row * GRID_W, (row + 1) * GRID_W
-        b0, b1 = OFF + row * GRID_W, OFF + (row + 1) * GRID_W
-        _quad(t0, b0, b1, t1)
+        for col in range(GRID_W):
+            if (row, col) not in surf_idx or (row + 1, col) not in surf_idx:
+                continue
+            t0, t1 = surf_idx[(row, col)],     surf_idx[(row + 1, col)]
+            b0, b1 = bot_idx [(row, col)],     bot_idx [(row + 1, col)]
+            # Wall on the left side of this column
+            if col == 0 or (row, col - 1) not in surf_idx:
+                faces.extend([t0, b0, b1,  t0, b1, t1])
+            # Wall on the right side of this column
+            if col == GRID_W - 1 or (row, col + 1) not in surf_idx:
+                faces.extend([t0, t1, b1,  t0, b1, b0])
 
-    # Right wall (col = GRID_W-1)
-    for row in range(GRID_H - 1):
-        t0 = row * GRID_W + (GRID_W - 1)
-        t1 = (row + 1) * GRID_W + (GRID_W - 1)
-        b0 = OFF + row * GRID_W + (GRID_W - 1)
-        b1 = OFF + (row + 1) * GRID_W + (GRID_W - 1)
-        _quad(t0, t1, b1, b0)
+    for row in range(GRID_H):
+        for col in range(GRID_W - 1):
+            if (row, col) not in surf_idx or (row, col + 1) not in surf_idx:
+                continue
+            t0, t1 = surf_idx[(row, col)],     surf_idx[(row, col + 1)]
+            b0, b1 = bot_idx [(row, col)],     bot_idx [(row, col + 1)]
+            # Wall on the top edge of this row
+            if row == 0 or (row - 1, col) not in surf_idx:
+                faces.extend([t0, t1, b1,  t0, b1, b0])
+            # Wall on the bottom edge of this row
+            if row == GRID_H - 1 or (row + 1, col) not in surf_idx:
+                faces.extend([t0, b0, b1,  t0, b1, t1])
 
     return {"type": "mesh", "vertices": verts, "faces": faces, "colors": colors}
 
