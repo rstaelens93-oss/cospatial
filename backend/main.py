@@ -341,7 +341,7 @@ def _make_fallback_points() -> list[dict[str, Any]]:
 
 
 def _flood_fill_fg_mask(
-    px: Any, gw: int, gh: int, threshold: int = 35
+    px: Any, gw: int, gh: int, threshold: int = 40
 ) -> list[list[bool]]:
     """
     BFS flood-fill from the 4 corner pixels to identify background.
@@ -354,6 +354,10 @@ def _flood_fill_fg_mask(
     near-white / soft-gradient — the typical case for AI concept art.
     Falls back gracefully: if the corners land on a non-white subject the
     threshold won't propagate far and most pixels remain foreground.
+
+    Threshold raised slightly (35→40) to better capture soft shadow halos
+    common in AI-generated art; morphological post-processing (see
+    _open_mask) then cleans any resulting ragged edges.
     """
     corner_coords = [(0, 0), (gw - 1, 0), (0, gh - 1), (gw - 1, gh - 1)]
     sr, sg, sb = 0, 0, 0
@@ -392,6 +396,114 @@ def _flood_fill_fg_mask(
                     queue.append((nx, ny))
 
     return [[not is_bg[row][col] for col in range(gw)] for row in range(gh)]
+
+
+def _open_mask(mask: list[list[bool]], gw: int, gh: int) -> list[list[bool]]:
+    """
+    Morphological opening (1-pixel erosion followed by 1-pixel dilation) using
+    a 4-connected structuring element.
+
+    Opening removes isolated single-pixel noise and ragged protrusions at the
+    foreground/background boundary without shrinking the core subject area
+    (the dilation pass restores what the erosion removed from the interior).
+
+    Using 4-connectivity (not 8) keeps the operation tight and avoids
+    over-smoothing fine subject features on the 64×40 grid.
+    """
+    NEIGHBOURS = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+    # ── Erosion: a fg pixel stays fg only if all 4-connected in-bounds
+    #    neighbours are also fg.  Out-of-bounds neighbours are treated as
+    #    bg so edge pixels are always eroded (they are on the image border).
+    eroded = [[False] * gw for _ in range(gh)]
+    for row in range(gh):
+        for col in range(gw):
+            if not mask[row][col]:
+                continue
+            ok = True
+            for dr, dc in NEIGHBOURS:
+                nr, nc = row + dr, col + dc
+                if not (0 <= nr < gh and 0 <= nc < gw) or not mask[nr][nc]:
+                    ok = False
+                    break
+            eroded[row][col] = ok
+
+    # ── Dilation: a pixel becomes fg if any 4-connected neighbour is fg in
+    #    the eroded mask.
+    dilated = [[False] * gw for _ in range(gh)]
+    for row in range(gh):
+        for col in range(gw):
+            if eroded[row][col]:
+                dilated[row][col] = True
+                continue
+            for dr, dc in NEIGHBOURS:
+                nr, nc = row + dr, col + dc
+                if 0 <= nr < gh and 0 <= nc < gw and eroded[nr][nc]:
+                    dilated[row][col] = True
+                    break
+
+    return dilated
+
+
+def _edge_feather_weights(
+    fg: list[list[bool]], gw: int, gh: int, feather_cells: int = 3
+) -> list[list[float]]:
+    """
+    BFS inward from the foreground boundary to assign a smooth feather weight
+    in [0.0, 1.0] to every foreground pixel.
+
+    Pixels more than ``feather_cells`` steps from any background pixel receive
+    weight 1.0 (full depth).  Boundary-adjacent pixels receive
+    1 / (feather_cells + 1) and the ramp increases linearly inward.
+
+    The feather weight is multiplied into the depth value in _image_to_mesh so
+    that silhouette edges blend smoothly to the background plane instead of
+    producing a hard-cut step.
+    """
+    NEIGHBOURS = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+    # Initialise: bg → distance 0, fg → -1 (unvisited)
+    dist: list[list[int]] = [
+        [0 if not fg[row][col] else -1 for col in range(gw)]
+        for row in range(gh)
+    ]
+
+    # Seed queue with fg pixels that touch at least one bg pixel.
+    queue: list[tuple[int, int]] = []
+    for row in range(gh):
+        for col in range(gw):
+            if not fg[row][col]:
+                continue
+            for dr, dc in NEIGHBOURS:
+                nr, nc = row + dr, col + dc
+                if not (0 <= nr < gh and 0 <= nc < gw) or not fg[nr][nc]:
+                    # This fg pixel borders a bg pixel (or the image edge).
+                    dist[row][col] = 1
+                    queue.append((row, col))
+                    break
+
+    # BFS inward.
+    head = 0
+    while head < len(queue):
+        row, col = queue[head]; head += 1
+        for dr, dc in NEIGHBOURS:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < gh and 0 <= nc < gw and dist[nr][nc] == -1:
+                dist[nr][nc] = dist[row][col] + 1
+                queue.append((nr, nc))
+
+    # Convert distance to weight.
+    weights: list[list[float]] = [[1.0] * gw for _ in range(gh)]
+    for row in range(gh):
+        for col in range(gw):
+            d = dist[row][col]
+            if d <= 0:
+                weights[row][col] = 0.0  # background
+            elif d <= feather_cells:
+                weights[row][col] = d / (feather_cells + 1)
+            # else: weight stays 1.0
+
+    return weights
 
 
 def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
@@ -460,13 +572,27 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
         surface_rgb.append(row_rgb)
 
     # ── Foreground mask ───────────────────────────────────────────────────
-    fg = _flood_fill_fg_mask(px, GRID_W, GRID_H, threshold=35)
+    fg = _flood_fill_fg_mask(px, GRID_W, GRID_H, threshold=40)
 
     # Fallback: if fewer than 10 % of pixels are foreground, the corners
     # probably landed on the subject — disable masking for this image.
     fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
     if fg_count < GRID_W * GRID_H * 0.10:
         fg = [[True] * GRID_W for _ in range(GRID_H)]
+    else:
+        # Morphological opening (erode → dilate) removes single-pixel noise
+        # and ragged protrusions at the silhouette boundary without shrinking
+        # the core subject shape.
+        fg = _open_mask(fg, GRID_W, GRID_H)
+
+        # Re-check after opening — opening can only reduce fg_count.
+        fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
+        if fg_count < GRID_W * GRID_H * 0.10:
+            fg = [[True] * GRID_W for _ in range(GRID_H)]
+
+    # Per-pixel feather weights: depth is graded toward 0 within 3 cells of
+    # the boundary so silhouette edges blend smoothly instead of hard-cutting.
+    feather = _edge_feather_weights(fg, GRID_W, GRID_H, feather_cells=3)
 
     # ── Build foreground-only vertex arrays (remapped indices) ─────────────
     # surf_idx[(row,col)] → new vertex index  (top surface, fg only)
@@ -487,6 +613,9 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
             cmin  = min(r_f, g_f, b_f)
             sat   = (cmax - cmin) / cmax if cmax > 1e-6 else 0.0
             depth = 0.6 * (1.0 - luma) + 0.4 * sat
+            # Feather: grade depth toward zero near the silhouette edge so
+            # the boundary blends smoothly instead of stepping hard to bg.
+            depth *= feather[row][col]
             x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
             y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
             z = round(depth * Z_SCALE - Z_SCALE / 2.0, 3)
