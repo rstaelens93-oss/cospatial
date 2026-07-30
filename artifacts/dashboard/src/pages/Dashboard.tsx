@@ -126,12 +126,25 @@ export default function Dashboard() {
     : null;
 
   return (
-    <div className="flex flex-col min-h-[100dvh] w-full overflow-hidden" style={{ background: "hsl(215 28% 7%)" }}>
-      {/* ── Top header bar ── */}
+    <div
+      style={{
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
+        position: "relative",
+        background: "hsl(215 28% 7%)",
+      }}
+    >
+      {/* ── Top header bar — fixed so it doesn't consume grid height ── */}
       <header
-        className="flex-shrink-0 flex items-center px-4 gap-4"
+        className="flex items-center px-4 gap-4"
         style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100vw",
           height: "44px",
+          zIndex: 20,
           background: "hsl(215 24% 8%)",
           borderBottom: "1px solid hsl(213 18% 15%)",
           boxShadow: "0 1px 0 rgba(0, 212, 255, 0.05)",
@@ -229,21 +242,29 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* ── Four-panel grid ── */}
+      {/* ── Strict 2×2 grid — each cell is exactly 50vw × 50vh ── */}
       <main
-        className="flex-1 min-h-0 grid"
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gridTemplateRows: "1fr 1fr",
+          gridTemplateColumns: "50vw 50vw",
+          gridTemplateRows: "50vh 50vh",
+          width: "100vw",
+          height: "100vh",
+          overflow: "hidden",
           gap: "1px",
-          background: "hsl(213 18% 13%)", // gap color — acts as divider lines
+          background: "hsl(213 18% 13%)", // gap colour — acts as divider lines
         }}
       >
         {/* TOP-LEFT: AI Concept Generator */}
         <div
-          className="flex flex-col overflow-hidden panel-grid-line"
-          style={{ background: "hsl(215 24% 9%)" }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            background: "hsl(215 24% 9%)",
+            width: "100%",
+            height: "100%",
+          }}
         >
           <PanelHeader
             icon={<Sparkles size={11} style={{ color: "#00d4ff" }} />}
@@ -251,7 +272,7 @@ export default function Dashboard() {
             status={conceptPanelStatus}
             badge={latestConcept ? `#${latestConcept.id}` : undefined}
           />
-          <div className="flex-1 min-h-0 overflow-hidden">
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
             <ConceptPanel
               onConceptGenerated={handleConceptGenerated}
               latestConcept={latestConcept}
@@ -261,8 +282,14 @@ export default function Dashboard() {
 
         {/* TOP-RIGHT: Generated Image */}
         <div
-          className="flex flex-col overflow-hidden panel-grid-line"
-          style={{ background: "hsl(215 24% 9%)" }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            background: "hsl(215 24% 9%)",
+            width: "100%",
+            height: "100%",
+          }}
         >
           <PanelHeader
             icon={<Image size={11} style={{ color: "#00d4ff" }} />}
@@ -270,15 +297,21 @@ export default function Dashboard() {
             status={isGenerating ? "processing" : latestConcept ? "active" : "idle"}
             badge={liveImageUrl ? "IMAGE" : latestConcept ? "PROMPT" : undefined}
           />
-          <div className="flex-1 min-h-0 overflow-hidden relative">
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }}>
             <ImagePanel concept={displayConcept} isGenerating={isGenerating} />
           </div>
         </div>
 
         {/* BOTTOM-LEFT: Python Engine */}
         <div
-          className="flex flex-col overflow-hidden"
-          style={{ background: "hsl(215 24% 9%)" }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            background: "hsl(215 24% 9%)",
+            width: "100%",
+            height: "100%",
+          }}
         >
           <PanelHeader
             icon={<Terminal size={11} style={{ color: "#00d4ff" }} />}
@@ -286,15 +319,21 @@ export default function Dashboard() {
             status={pythonPanelStatus}
             badge="PYTHON"
           />
-          <div className="flex-1 min-h-0 overflow-hidden">
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
             <PythonPanel onSceneData={handleSceneData} />
           </div>
         </div>
 
         {/* BOTTOM-RIGHT: 3D Viewport */}
         <div
-          className="flex flex-col overflow-hidden"
-          style={{ background: "hsl(215 24% 9%)" }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            background: "hsl(215 24% 9%)",
+            width: "100%",
+            height: "100%",
+          }}
         >
           <PanelHeader
             icon={<Box size={11} style={{ color: "#00d4ff" }} />}
@@ -302,7 +341,7 @@ export default function Dashboard() {
             status={sceneData ? "active" : "idle"}
             badge="THREE.JS"
           />
-          <div className="flex-1 min-h-0 overflow-hidden">
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
             <ViewportPanel sceneData={sceneData} />
           </div>
         </div>
