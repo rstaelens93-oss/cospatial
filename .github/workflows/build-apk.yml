@@ -30,36 +30,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Runtimes ─────────────────────────────────────────────────────────
+      # ── 2. JDK ──────────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
+      # ── 3. Node.js ───────────────────────────────────────────────────────────
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # ── 3. Android SDK ───────────────────────────────────────────────────────
-      #  ubuntu-latest ships with the SDK at $ANDROID_SDK_ROOT; we just need
-      #  to accept licences and ensure the correct platform + build-tools are present.
-      - name: Accept Android SDK licences & install platform components
+      # ── 4. Android SDK (clean, bubblewrap-compatible layout) ─────────────────
+      #  android-actions/setup-android installs a fresh SDK and exports
+      #  ANDROID_SDK_ROOT with the standard directory tree that bubblewrap
+      #  validates against (build-tools/, platform-tools/, platforms/, etc.).
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform & build-tools
         run: |
-          SDK_MANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
-          "$SDK_MANAGER" \
+          sdkmanager \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             "platform-tools" \
             --channel=0
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-      # ── 4. Bubblewrap CLI ────────────────────────────────────────────────────
+      # ── 5. Bubblewrap CLI ────────────────────────────────────────────────────
       - name: Install @bubblewrap/cli
         run: npm install -g @bubblewrap/cli
 
-      # Point bubblewrap at the JDK and SDK that were just set up.
       - name: Write bubblewrap config
         run: |
           mkdir -p ~/.bubblewrap
@@ -67,10 +70,12 @@ jobs:
             "$JAVA_HOME" \
             "$ANDROID_SDK_ROOT" \
             > ~/.bubblewrap/config.json
-          echo "Bubblewrap config:"
+          echo "=== Bubblewrap config ==="
           cat ~/.bubblewrap/config.json
+          echo "=== SDK root contents ==="
+          ls "$ANDROID_SDK_ROOT"
 
-      # ── 5. Signing keystore ──────────────────────────────────────────────────
+      # ── 6. Signing keystore ──────────────────────────────────────────────────
       - name: Provision signing keystore
         env:
           KEYSTORE_BASE64:    ${{ secrets.KEYSTORE_BASE64 }}
@@ -84,7 +89,7 @@ jobs:
             echo "✅ Restoring production keystore from GitHub Secrets"
             echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           else
-            echo "⚠️  No KEYSTORE_BASE64 secret found – generating a debug keystore"
+            echo "⚠️  No KEYSTORE_BASE64 secret – generating a debug keystore"
             keytool -genkey -v \
               -keystore android.keystore \
               -alias    cospatial \
@@ -97,15 +102,12 @@ jobs:
               2>&1
           fi
 
-          # Verify the keystore is readable
           keytool -list -keystore android.keystore \
             -alias cospatial \
             -storepass "$KS_PASS" \
             -noprompt
 
-      # ── 6. Build ─────────────────────────────────────────────────────────────
-      # bubblewrap reads twa-manifest.json from $PWD and prompts for passwords
-      # when stdin is not a TTY.  We pipe them in with printf.
+      # ── 7. Build ─────────────────────────────────────────────────────────────
       - name: Build APK with bubblewrap
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -113,28 +115,18 @@ jobs:
         run: |
           KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
           KEY_PASS="${KEY_PASSWORD:-cospatial}"
-
-          # bubblewrap may prompt: "Keystore password:" then "Key password:"
           printf '%s\n%s\n' "$KS_PASS" "$KEY_PASS" \
             | bubblewrap build --skipPwaValidation
 
-      # ── 7. Locate & stage the APK ────────────────────────────────────────────
+      # ── 8. Locate & stage the APK ────────────────────────────────────────────
       - name: Stage CoSpatial.apk
         run: |
-          # bubblewrap places the signed APK in android/app/build/outputs/apk/release/
           APK=$(find android/app/build/outputs/apk/release \
-            -name "*.apk" \
-            ! -name "*unsigned*" \
-            | head -1 2>/dev/null || true)
+            -name "*.apk" ! -name "*unsigned*" | head -1 2>/dev/null || true)
 
-          # Fallback: search the whole tree
           if [ -z "$APK" ]; then
-            APK=$(find . \
-              -name "*.apk" \
-              ! -name "*unsigned*" \
-              ! -path "*/node_modules/*" \
-              ! -path "*/.git/*" \
-              | head -1)
+            APK=$(find . -name "*.apk" ! -name "*unsigned*" \
+              ! -path "*/node_modules/*" ! -path "*/.git/*" | head -1)
           fi
 
           if [ -z "$APK" ]; then
@@ -147,16 +139,16 @@ jobs:
           cp "$APK" CoSpatial.apk
           ls -lh CoSpatial.apk
 
-      # ── 8. Upload artifact ───────────────────────────────────────────────────
+      # ── 9. Upload artifact ───────────────────────────────────────────────────
       - name: Upload CoSpatial.apk
         uses: actions/upload-artifact@v4
         with:
-          name: CoSpatial
+          name: CoSpatial APK
           path: CoSpatial.apk
           retention-days: 30
           if-no-files-found: error
 
-      # ── 9. Summary ───────────────────────────────────────────────────────────
+      # ── 10. Summary ──────────────────────────────────────────────────────────
       - name: Build summary
         run: |
           echo "## ✅ CoSpatial APK built" >> $GITHUB_STEP_SUMMARY
@@ -169,5 +161,5 @@ jobs:
           SIZE=$(du -h CoSpatial.apk | cut -f1)
           echo "| APK size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download **CoSpatial** from the _Artifacts_ section of this run." \
+          echo "Download **CoSpatial APK** from the _Artifacts_ section of this run." \
             >> $GITHUB_STEP_SUMMARY
