@@ -37,7 +37,6 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
   const controlsRef = useRef<OrbitControls | null>(null);
   const animFrameRef = useRef<number>(0);
   const userGroupRef = useRef<THREE.Group | null>(null);
-  const defaultMeshRef = useRef<THREE.Mesh | null>(null);
   const pointLightRef = useRef<THREE.PointLight | null>(null);
   const customObjectsRef = useRef<THREE.Object3D[]>([]);
   const clockRef = useRef(new THREE.Timer());
@@ -181,26 +180,8 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
     pointLight2.position.set(-3, -2, 2);
     scene.add(pointLight2);
 
-    // Default wireframe icosahedron
-    const icoGeo = new THREE.IcosahedronGeometry(1.4, 1);
-    const icoMat = new THREE.MeshPhongMaterial({
-      color: 0x00d4ff,
-      wireframe: true,
-      opacity: 0.6,
-      transparent: true,
-    });
-    const icoMesh = new THREE.Mesh(icoGeo, icoMat);
-    userGroup.add(icoMesh);
-    defaultMeshRef.current = icoMesh;
-
-    // Inner solid icosahedron
-    const icoGeoSolid = new THREE.IcosahedronGeometry(1.35, 1);
-    const icoMatSolid = new THREE.MeshPhongMaterial({
-      color: 0x001a2e,
-      opacity: 0.85,
-      transparent: true,
-    });
-    userGroup.add(new THREE.Mesh(icoGeoSolid, icoMatSolid));
+    // No default object — viewport starts as a clean open workspace
+    // so generated models render in the centre without obstruction.
 
     // Grid helper
     const gridHelper = new THREE.GridHelper(20, 30, 0x0d2033, 0x091420);
@@ -236,12 +217,6 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
           const g = (Math.sin(elapsed * 0.2 + 2) * 0.5 + 0.5) * 0.6 + 0.4;
           pointLightRef.current.color.setRGB(0, g * 0.5, 1.0);
           pointLightRef.current.intensity = 3 + Math.sin(elapsed * 0.8) * 1.5;
-        }
-
-        // Pulse default mesh scale when visible
-        if (defaultMeshRef.current && defaultMeshRef.current.visible) {
-          const s = 1 + Math.sin(elapsed * 1.2) * 0.06;
-          defaultMeshRef.current.scale.setScalar(s);
         }
 
         // OrbitControls requires update() each frame when damping is enabled
@@ -310,11 +285,6 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
       userGroupRef.current?.remove(obj);
     });
     customObjectsRef.current = [];
-
-    // Hide default icosahedron when custom scene is loaded
-    if (defaultMeshRef.current) {
-      defaultMeshRef.current.visible = false;
-    }
 
     if (parsed.type === "points" && parsed.points) {
       const count = parsed.points.length;
