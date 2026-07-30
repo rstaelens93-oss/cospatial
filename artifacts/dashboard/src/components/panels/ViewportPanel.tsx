@@ -31,7 +31,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
   const defaultMeshRef = useRef<THREE.Mesh | null>(null);
   const pointLightRef = useRef<THREE.PointLight | null>(null);
   const customObjectsRef = useRef<THREE.Object3D[]>([]);
-  const clockRef = useRef(new THREE.Clock());
+  const clockRef = useRef(new THREE.Timer());
 
   // Mouse drag state
   const isDraggingRef = useRef(false);
@@ -147,7 +147,8 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     const animate = () => {
       try {
         animFrameRef.current = requestAnimationFrame(animate);
-        const elapsed = clockRef.current.getElapsedTime();
+        clockRef.current.update();
+        const elapsed = clockRef.current.getElapsed();
 
         if (rotationGroupRef.current) {
           rotationGroupRef.current.rotation.y = elapsed * 0.15;
