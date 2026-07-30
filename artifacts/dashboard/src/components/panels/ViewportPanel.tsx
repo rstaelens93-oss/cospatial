@@ -168,15 +168,23 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
     userGroupRef.current = userGroup;
 
     // Lights
-    const ambientLight = new THREE.AmbientLight(0x0d2033, 2.5);
+    // White ambient ensures vertex colors read true regardless of object orientation.
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
     scene.add(ambientLight);
 
-    const pointLight = new THREE.PointLight(0x00d4ff, 4, 20);
+    // Directional key light — white, positioned top-front-right for clear
+    // highlights and depth shadows across generated mesh surfaces.
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(4, 6, 4);
+    scene.add(dirLight);
+
+    // Subtle fill light — very slightly cool white for a soft sci-fi rim.
+    const pointLight = new THREE.PointLight(0xaabbcc, 1.0, 25);
     pointLight.position.set(3, 3, 3);
     scene.add(pointLight);
     pointLightRef.current = pointLight;
 
-    const pointLight2 = new THREE.PointLight(0x0066aa, 2, 15);
+    const pointLight2 = new THREE.PointLight(0x8899bb, 0.8, 20);
     pointLight2.position.set(-3, -2, 2);
     scene.add(pointLight2);
 
@@ -212,11 +220,12 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
         clockRef.current.update();
         const elapsed = clockRef.current.getElapsed();
 
-        // Animate point light color only — no object auto-rotation
+        // Subtle cool-white fill pulse — never drops red to zero so vertex
+        // colours on generated meshes always read true.
         if (pointLightRef.current) {
-          const g = (Math.sin(elapsed * 0.2 + 2) * 0.5 + 0.5) * 0.6 + 0.4;
-          pointLightRef.current.color.setRGB(0, g * 0.5, 1.0);
-          pointLightRef.current.intensity = 3 + Math.sin(elapsed * 0.8) * 1.5;
+          const t = Math.sin(elapsed * 0.4) * 0.5 + 0.5; // 0..1
+          pointLightRef.current.color.setRGB(0.7 + t * 0.3, 0.85 + t * 0.15, 1.0);
+          pointLightRef.current.intensity = 0.8 + t * 0.4;
         }
 
         // OrbitControls requires update() each frame when damping is enabled
