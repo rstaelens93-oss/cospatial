@@ -562,7 +562,10 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     #   • XY axes scaled uniformly so the widest axis fills [-2.0, +2.0].
     #   • Z axis scaled independently so depth ≤ 12 % of XY width,
     #     preventing the depth-displacement from stretching the model.
-    # All coordinates are re-centred at the origin first.
+    # XY re-centred using the foreground-vertex centroid (mean x/y) so the
+    # subject always lands at the world origin even when the image composition
+    # is off-centre (e.g. subject occupies only the left third of the frame).
+    # Z is still re-centred on the bounding-box midpoint (unchanged behaviour).
     TARGET   = 2.0          # half-extent target on each axis
     Z_PCT    = 0.12         # max Z depth as fraction of normalised XY span
 
@@ -570,9 +573,10 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     ys = verts[1::3]
     zs = verts[2::3]
 
-    x_ctr = (max(xs) + min(xs)) / 2.0
-    y_ctr = (max(ys) + min(ys)) / 2.0
-    z_ctr = (max(zs) + min(zs)) / 2.0
+    n_verts  = len(xs)
+    x_ctr    = sum(xs) / n_verts          # foreground centroid, not bbox midpoint
+    y_ctr    = sum(ys) / n_verts          # foreground centroid, not bbox midpoint
+    z_ctr    = (max(zs) + min(zs)) / 2.0  # bbox midpoint (depth range is symmetric)
 
     xy_half   = max((max(xs) - min(xs)) / 2.0,
                     (max(ys) - min(ys)) / 2.0,
