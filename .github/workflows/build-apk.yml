@@ -6,6 +6,8 @@ on:
     paths:
       - 'artifacts/dashboard/**'
       - '.github/workflows/build-apk.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   workflow_dispatch:
 
 jobs:
