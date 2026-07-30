@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections import defaultdict, deque
 from typing import Any, Generator, Optional
 
@@ -284,6 +285,41 @@ async def generate_concept(
     _increment_monthly_counter(user_id, db)
 
     return result["data"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image generation endpoint  (Pollinations.ai – no API key required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/python-api/generate-image")
+async def generate_image(request: Request) -> dict:
+    """
+    Return a Pollinations.ai image URL for the given prompt.
+
+    The URL itself is the image – Pollinations renders on first GET so the
+    frontend can drop it straight into an <img> src without any extra fetch.
+
+    Request body  (JSON):
+      { "prompt": "<text describing the image>" }
+
+    Response:
+      { "imageUrl": "https://image.pollinations.ai/prompt/<encoded>?..." }
+    """
+    body: dict = await request.json()
+    raw_prompt: str = body.get("prompt", "").strip()
+
+    if not raw_prompt:
+        raise HTTPException(status_code=400, detail="'prompt' is required.")
+
+    # URL-encode the prompt so spaces and special chars are path-safe.
+    encoded_prompt: str = urllib.parse.quote(raw_prompt, safe="")
+
+    image_url = (
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        "?width=1024&height=1024&nologo=true"
+    )
+
+    return {"imageUrl": image_url}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
