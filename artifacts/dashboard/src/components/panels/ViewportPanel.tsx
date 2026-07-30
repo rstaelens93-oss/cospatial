@@ -278,7 +278,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
         // the top-level palette color for single-color Python-generated clouds.
         color: hasVertexColors ? 0xffffff : new THREE.Color(parsed.color ?? "#00ffcc"),
         vertexColors: hasVertexColors,
-        size: hasVertexColors ? 0.14 : 0.08,
+        size: hasVertexColors ? 0.08 : 0.08,
         sizeAttenuation: true,
       });
 

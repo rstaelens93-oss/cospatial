@@ -319,7 +319,7 @@ def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
     if not _PIL_AVAILABLE:
         return []
 
-    GRID_W, GRID_H = 48, 30
+    GRID_W, GRID_H = 96, 60
 
     try:
         req = urllib.request.Request(
