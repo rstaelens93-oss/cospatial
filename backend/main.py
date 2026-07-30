@@ -595,56 +595,253 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     return {"type": "mesh", "vertices": verts, "faces": faces, "colors": colors}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Meshy Image-to-3D integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Read once at startup — empty string or any placeholder triggers sandbox mode.
+_MESHY_API_KEY: str = os.environ.get("MESHY_API_KEY", "").strip()
+_MESHY_SANDBOX: bool = _MESHY_API_KEY.lower() in {
+    "", "sandbox", "mock", "test", "placeholder",
+    "your_meshy_api_key_here", "your-meshy-api-key",
+}
+
+_MESHY_BASE = "https://api.meshy.ai"
+
+
+def _parse_obj_mesh(obj_text: str) -> tuple[list[float], list[int]]:
+    """
+    Parse a Wavefront OBJ string into flat ``[x,y,z, …]`` vertex and
+    ``[i,j,k, …]`` face index arrays (0-based).
+
+    Handles the full OBJ vertex/face grammar including ``v/vt``,
+    ``v/vt/vn``, ``v//vn`` index formats and fan-triangulates any
+    polygon with more than 3 vertices.
+    """
+    verts: list[float] = []
+    faces: list[int]   = []
+    for raw in obj_text.splitlines():
+        parts = raw.split()
+        if not parts:
+            continue
+        tok = parts[0]
+        if tok == "v" and len(parts) >= 4:
+            try:
+                verts.extend([float(parts[1]), float(parts[2]), float(parts[3])])
+            except ValueError:
+                pass
+        elif tok == "f" and len(parts) >= 4:
+            idxs: list[int] = []
+            for p in parts[1:]:
+                try:
+                    idxs.append(int(p.split("/")[0]) - 1)  # 1-based → 0-based
+                except ValueError:
+                    pass
+            for i in range(1, len(idxs) - 1):              # fan triangulation
+                faces.extend([idxs[0], idxs[i], idxs[i + 1]])
+    return verts, faces
+
+
+def _normalise_verts(verts: list[float], z_pct: float = 1.0) -> list[float]:
+    """
+    Re-centre and uniformly scale a flat ``[x,y,z, …]`` vertex list so
+    the mesh fits inside a [-2, +2] bounding cube.
+
+    ``z_pct`` caps Z depth as a fraction of XY span:
+      • z_pct=1.0  — uncapped (true 3D models, full roundness preserved)
+      • z_pct=0.12 — relief cap used for the heightmap fallback
+    """
+    if not verts:
+        return verts
+    TARGET = 2.0
+    xs = verts[0::3]; ys = verts[1::3]; zs = verts[2::3]
+    x_ctr = (max(xs) + min(xs)) / 2.0
+    y_ctr = (max(ys) + min(ys)) / 2.0
+    z_ctr = (max(zs) + min(zs)) / 2.0
+    xy_half  = max((max(xs) - min(xs)) / 2.0, (max(ys) - min(ys)) / 2.0, 1e-6)
+    xy_scale = TARGET / xy_half
+    z_half   = max((max(zs) - min(zs)) / 2.0, 1e-6)
+    z_cap    = TARGET * 2.0 * z_pct            # max allowed z half-extent
+    z_scale  = min(z_cap / z_half, xy_scale)   # never exceed XY scale
+    out: list[float] = []
+    for i in range(len(verts) // 3):
+        out.append(round((verts[i * 3]     - x_ctr) * xy_scale, 3))
+        out.append(round((verts[i * 3 + 1] - y_ctr) * xy_scale, 3))
+        out.append(round((verts[i * 3 + 2] - z_ctr) * z_scale,  3))
+    return out
+
+
+def _meshy_submit_task(image_url: str) -> str | None:
+    """
+    POST to ``POST /openapi/v1/image-to-3d``.
+    Returns the task_id string on success, None on any error.
+    Runs synchronously inside a thread-pool executor.
+    """
+    try:
+        body = json.dumps({
+            "image_url": image_url,
+            "enable_pbr": False,
+            "ai_model": "meshy-4",
+        }).encode()
+        req = urllib.request.Request(
+            f"{_MESHY_BASE}/openapi/v1/image-to-3d",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {_MESHY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        return data.get("result") or None
+    except Exception:
+        return None
+
+
+def _meshy_poll_task(task_id: str) -> tuple[str, str | None]:
+    """
+    GET ``/openapi/v1/image-to-3d/{task_id}``.
+    Returns ``(status, obj_url_or_None)``.
+    Possible statuses: PENDING | IN_PROGRESS | SUCCEEDED | FAILED | EXPIRED.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{_MESHY_BASE}/openapi/v1/image-to-3d/{task_id}",
+            headers={"Authorization": f"Bearer {_MESHY_API_KEY}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        status  = data.get("status", "PENDING")
+        obj_url = (
+            data.get("model_urls", {}).get("obj")
+            if status == "SUCCEEDED" else None
+        )
+        return status, obj_url
+    except Exception:
+        return "ERROR", None
+
+
+def _meshy_fetch_and_parse(obj_url: str) -> dict[str, Any] | None:
+    """
+    Download the Meshy OBJ file, parse vertices + faces, normalise to the
+    [-2, +2] bounding cube preserving true 3D proportions (z_pct=1.0).
+    Returns a mesh dict ready for JSON broadcast, or None on failure.
+    """
+    try:
+        req = urllib.request.Request(
+            obj_url, headers={"User-Agent": "CospaSpatial/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            obj_text = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    verts, faces = _parse_obj_mesh(obj_text)
+    if not verts or not faces:
+        return None
+
+    # z_pct=1.0 → full roundness preserved; mesh fits within [-2, +2] cube.
+    verts = _normalise_verts(verts, z_pct=1.0)
+    return {"type": "mesh", "vertices": verts, "faces": faces, "colors": []}
+
+
 async def _process_image_to_scene(image_url: str, room_id: str = "global") -> None:
     """
-    Background async task: retry-fetch → build mesh → broadcast.
+    Background async task — two-stage 3D pipeline.
 
-    Tries up to MAX_ATTEMPTS times with RETRY_DELAY_S seconds between
-    attempts (Pollinations lazy-renders; typically ready in 15–30 s).
-    On success, broadcasts a ``type: "mesh"`` payload with vertices, faces,
-    and packed per-vertex colors so Three.js renders a solid textured object.
-    After all retries, falls back to the rainbow-helix point cloud so the
-    WebSocket bridge is always confirmed live.  Never propagates exceptions.
+    ── Meshy mode (MESHY_API_KEY set to a real key) ────────────────────────
+    1. Submit the Pollinations image URL to Meshy Image-to-3D immediately.
+    2. While Meshy processes (~1–3 min), broadcast the local heightmap as an
+       instant preview so the viewport is never empty.
+    3. When Meshy returns the completed manifold mesh, broadcast it — Three.js
+       replaces the preview with the fully-rounded model.
+    4. If Meshy fails/times-out the heightmap preview remains visible.
+
+    ── Sandbox mode (no key or placeholder) ────────────────────────────────
+    Runs the local heightmap pipeline with retries only (existing behaviour).
+    Falls back to the rainbow-helix point cloud if all attempts fail.
+
+    Never propagates exceptions — safe as a fire-and-forget background task.
     """
-    MAX_ATTEMPTS  = 4
-    RETRY_DELAY_S = 12.0   # attempts at 0 s, 12 s, 24 s, 36 s
+    POLL_INTERVAL_S   = 10.0   # seconds between Meshy status checks
+    MAX_POLL_ATTEMPTS = 18     # 18 × 10 s = 3-minute ceiling
+    PREVIEW_DELAY_S   = 12.0   # wait before first heightmap preview attempt
+    HM_RETRY_DELAY_S  = 12.0   # delay between heightmap retries
+    HM_MAX_ATTEMPTS   = 4
 
     try:
         loop = asyncio.get_event_loop()
-        t0 = time.perf_counter()
-        mesh: dict[str, Any] | None = None
+        t0   = time.perf_counter()
 
-        for attempt in range(MAX_ATTEMPTS):
-            if attempt > 0:
-                await asyncio.sleep(RETRY_DELAY_S)
-            try:
-                mesh = await loop.run_in_executor(None, _image_to_mesh, image_url)
-            except Exception:
-                mesh = None
-            if mesh is not None:
-                break
+        async def _broadcast(payload: dict[str, Any], source: str) -> None:
+            elapsed = round((time.perf_counter() - t0) * 1000, 1)
+            await manager.broadcast_to_room(room_id, {
+                "type":          "image_scene",
+                "sceneData":     json.dumps(payload),
+                "pointCount":    len(payload.get("faces", payload.get("points", []))) // 3,
+                "executionTime": elapsed,
+                "source":        source,
+            })
 
-        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        async def _heightmap_with_retries(label: str) -> bool:
+            """Build and broadcast a heightmap mesh; returns True on success."""
+            for attempt in range(HM_MAX_ATTEMPTS):
+                if attempt > 0:
+                    await asyncio.sleep(HM_RETRY_DELAY_S)
+                try:
+                    mesh = await loop.run_in_executor(None, _image_to_mesh, image_url)
+                except Exception:
+                    mesh = None
+                if mesh is not None:
+                    await _broadcast(mesh, label)
+                    return True
+            # All retries exhausted — broadcast geometric fallback
+            pts = _make_fallback_points()
+            await _broadcast({"type": "points", "points": pts}, "fallback_helix")
+            return False
 
-        if mesh is not None:
-            # Solid mesh from image
-            scene_json = json.dumps(mesh)
-            face_count  = len(mesh["faces"]) // 3
-        else:
-            # Geometric fallback — confirms WebSocket is alive
-            fallback_pts = _make_fallback_points()
-            scene_json   = json.dumps({"type": "points", "points": fallback_pts})
-            face_count   = len(fallback_pts)
+        # ── Sandbox / no-key path ─────────────────────────────────────────
+        if _MESHY_SANDBOX:
+            await _heightmap_with_retries("sandbox_heightmap")
+            return
 
-        await manager.broadcast_to_room(
-            room_id,
-            {
-                "type": "image_scene",
-                "sceneData": scene_json,
-                "pointCount": face_count,
-                "executionTime": elapsed_ms,
-            },
+        # ── Meshy pipeline ────────────────────────────────────────────────
+
+        # 1. Submit task to Meshy (fires immediately; image URL is valid now)
+        task_id: str | None = await loop.run_in_executor(
+            None, _meshy_submit_task, image_url
         )
+        if not task_id:
+            # API unreachable or auth failed — fall back entirely
+            await _heightmap_with_retries("fallback_heightmap")
+            return
+
+        # 2. Broadcast heightmap preview while Meshy processes
+        await asyncio.sleep(PREVIEW_DELAY_S)
+        await _heightmap_with_retries("preview_heightmap")
+
+        # 3. Poll Meshy until SUCCEEDED / FAILED / EXPIRED / timeout
+        obj_url: str | None = None
+        for _ in range(MAX_POLL_ATTEMPTS):
+            await asyncio.sleep(POLL_INTERVAL_S)
+            status, obj_url = await loop.run_in_executor(
+                None, _meshy_poll_task, task_id
+            )
+            if status == "SUCCEEDED" and obj_url:
+                break
+            if status in ("FAILED", "EXPIRED"):
+                return  # preview is already visible; nothing more to do
+
+        if not obj_url:
+            return  # timed out — keep the preview
+
+        # 4. Download OBJ, parse, normalise, broadcast final model
+        final_mesh = await loop.run_in_executor(
+            None, _meshy_fetch_and_parse, obj_url
+        )
+        if final_mesh is not None:
+            await _broadcast(final_mesh, "meshy_3d")
 
     except Exception:
         pass  # background task — never propagate to the event loop
