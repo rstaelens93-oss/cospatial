@@ -339,7 +339,7 @@ def _run_user_code_subprocess(code: str, timeout: float = 10.0) -> dict[str, Any
     emit_helper = (
         "import json as _json, sys as _sys\n"
         "def emit_scene(data):\n"
-        '    print(f"__SCENE_DATA__:{_json.dumps(data)}:__SCENE_DATA__", file=_sys.stderr)\n'
+        '    print(f"__SCENE_DATA__:{_json.dumps(data)}", file=_sys.stderr)\n'
         "\n"
     )
     full_code = emit_helper + code
@@ -362,15 +362,23 @@ def _run_user_code_subprocess(code: str, timeout: float = 10.0) -> dict[str, Any
         stdout = proc.stdout
         stderr_raw = proc.stderr
 
+        # Extract __SCENE_DATA__:<json> lines written by emit_scene() to stderr.
+        # Each such line is stripped from the visible stderr so it doesn't appear
+        # in the console output.  If emit_scene() is called multiple times, the
+        # last call wins (most recent scene replaces earlier ones).
         marker = "__SCENE_DATA__:"
         if marker in stderr_raw:
-            parts = stderr_raw.split(marker)
-            if len(parts) >= 3:
-                try:
-                    scene_data = parts[1]
-                    stderr_raw = parts[0] + (parts[2] if len(parts) > 2 else "")
-                except Exception:
-                    scene_data = None
+            scene_lines: list[str] = []
+            other_lines: list[str] = []
+            for line in stderr_raw.splitlines(keepends=True):
+                stripped = line.rstrip("\r\n")
+                if stripped.startswith(marker):
+                    scene_lines.append(stripped[len(marker):])
+                else:
+                    other_lines.append(line)
+            if scene_lines:
+                scene_data = scene_lines[-1]   # last emit_scene() call wins
+            stderr_raw = "".join(other_lines)
 
         return {
             "success": proc.returncode == 0,
