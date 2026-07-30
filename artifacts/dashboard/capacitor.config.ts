@@ -5,6 +5,7 @@ const config: CapacitorConfig = {
   appName: 'CoSpatial',
   webDir: 'dist/public',
   server: {
+    androidScheme: 'https',
     allowMixedContent: true
   },
   plugins: {
