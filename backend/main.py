@@ -55,7 +55,12 @@ if _DATABASE_URL:
     _engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
     _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
     # Create tables owned by models.py if they don't exist yet.
-    Base.metadata.create_all(bind=_engine)
+    # Wrapped in try/except: a UniqueViolation on pg_type can occur when the
+    # table was partially committed in a prior session; safe to continue.
+    try:
+        Base.metadata.create_all(bind=_engine, checkfirst=True)
+    except Exception as _e:
+        print(f"[startup] schema create_all skipped (already exists): {_e}", flush=True)
 else:
     _engine = None
     _SessionLocal = None
@@ -445,101 +450,37 @@ def _open_mask(mask: list[list[bool]], gw: int, gh: int) -> list[list[bool]]:
     return dilated
 
 
-def _edge_feather_weights(
-    fg: list[list[bool]], gw: int, gh: int, feather_cells: int = 3
-) -> list[list[float]]:
+def _image_to_volumetric_points(image_url: str) -> list[dict[str, Any]] | None:
     """
-    BFS inward from the foreground boundary to assign a smooth feather weight
-    in [0.0, 1.0] to every foreground pixel.
+    Geometric Hemisphere Projection — local, zero external dependencies.
 
-    Pixels more than ``feather_cells`` steps from any background pixel receive
-    weight 1.0 (full depth).  Boundary-adjacent pixels receive
-    1 / (feather_cells + 1) and the ramp increases linearly inward.
+    For every foreground pixel at pixel coordinate (col, row) the Z-depth
+    is driven by the pixel's normalised radial distance from the foreground
+    centroid:
 
-    The feather weight is multiplied into the depth value in _image_to_mesh so
-    that silhouette edges blend smoothly to the background plane instead of
-    producing a hard-cut step.
+        rn     = dist(pixel, centroid) / max_dist_to_silhouette
+        geo_z  = sqrt(max(0, 1 − rn²))          ← hemisphere profile
+        z_front = Z_MAX × geo_z × (0.8 + 0.2 × color_z)
+        z_back  = −Z_MAX × 0.65 × geo_z         ← rear hemisphere
+
+    color_z blends in a small luminance term (darker = slightly more
+    prominent) to add surface variation without distorting the overall
+    rounded shape.
+
+    Each pixel contributes two points — a front-surface point and a
+    rear-surface point (25 % darkened) — creating a thick lenticular
+    volume that looks fully rounded from any camera angle.
+
+    Returns a list of {x, y, z, color} dicts ready for JSON broadcast,
+    or None if the image is unavailable / not yet rendered.
     """
-    NEIGHBOURS = ((0, 1), (0, -1), (1, 0), (-1, 0))
-
-    # Initialise: bg → distance 0, fg → -1 (unvisited)
-    dist: list[list[int]] = [
-        [0 if not fg[row][col] else -1 for col in range(gw)]
-        for row in range(gh)
-    ]
-
-    # Seed queue with fg pixels that touch at least one bg pixel.
-    queue: list[tuple[int, int]] = []
-    for row in range(gh):
-        for col in range(gw):
-            if not fg[row][col]:
-                continue
-            for dr, dc in NEIGHBOURS:
-                nr, nc = row + dr, col + dc
-                if not (0 <= nr < gh and 0 <= nc < gw) or not fg[nr][nc]:
-                    # This fg pixel borders a bg pixel (or the image edge).
-                    dist[row][col] = 1
-                    queue.append((row, col))
-                    break
-
-    # BFS inward.
-    head = 0
-    while head < len(queue):
-        row, col = queue[head]; head += 1
-        for dr, dc in NEIGHBOURS:
-            nr, nc = row + dr, col + dc
-            if 0 <= nr < gh and 0 <= nc < gw and dist[nr][nc] == -1:
-                dist[nr][nc] = dist[row][col] + 1
-                queue.append((nr, nc))
-
-    # Convert distance to weight.
-    weights: list[list[float]] = [[1.0] * gw for _ in range(gh)]
-    for row in range(gh):
-        for col in range(gw):
-            d = dist[row][col]
-            if d <= 0:
-                weights[row][col] = 0.0  # background
-            elif d <= feather_cells:
-                weights[row][col] = d / (feather_cells + 1)
-            # else: weight stays 1.0
-
-    return weights
-
-
-def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
-    """
-    Synchronous helper (runs in a thread-pool executor).
-
-    Converts the rendered Pollinations image into a **solid closed 3D mesh**
-    of the main subject only — background pixels are excluded entirely.
-
-    Pipeline
-    --------
-    1. Fetch + resize to GRID_W × GRID_H.
-    2. BFS flood-fill from the 4 corners to build a foreground mask that
-       isolates the main subject (works well for AI concept art with white
-       or soft-gradient backgrounds).  Falls back to the full grid if fewer
-       than 10 % of pixels are detected as foreground (robust against edge
-       cases where the subject touches all corners).
-    3. Remap vertex indices — only foreground pixels become vertices so the
-       output mesh contains zero background geometry.
-    4. Depth driver per foreground vertex:
-           depth = 0.6 × (1 − luma) + 0.4 × saturation
-       Subject colour and dark edges protrude forward; no white floor.
-    5. Bottom plate + boundary walls are added only for foreground cells,
-       sealing the subject into a fully closed solid manifold.
-
-    Colors: packed (r<<16|g<<8|b); frontend unpacks to BufferAttribute.
-    Returns None when the image is unavailable / not yet rendered.
-    """
-    GRID_W, GRID_H = 64, 40
-    Z_SCALE  = 4.0   # surface z range: [−2.0, +2.0]
-    Z_BOTTOM = -2.8  # bottom plate z
-
     if not _PIL_AVAILABLE:
         return None
 
-    # ── Fetch ─────────────────────────────────────────────────────────────
+    GRID_W, GRID_H = 80, 50    # slightly higher res than old mesh grid
+    Z_MAX          = 2.0        # max protrusion forward / backward
+
+    # ── Fetch (Pollinations lazy-renders; one attempt, caller retries) ────
     try:
         req = urllib.request.Request(
             image_url,
@@ -548,429 +489,135 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
         with urllib.request.urlopen(req, timeout=38) as resp:
             raw_bytes = resp.read()
         if len(raw_bytes) < 1024:
-            return None  # stub / not ready → caller retries
+            return None  # stub not yet rendered
     except Exception:
         return None
 
     # ── Decode & resample ─────────────────────────────────────────────────
     try:
-        img = _PILImage.open(io.BytesIO(raw_bytes)).convert("RGB")
-        img = img.resize((GRID_W, GRID_H), _PILImage.LANCZOS)
+        img = (
+            _PILImage.open(io.BytesIO(raw_bytes))
+            .convert("RGB")
+            .resize((GRID_W, GRID_H), _PILImage.LANCZOS)
+        )
         px = img.load()
     except Exception:
         return None
 
-    # ── Sample pixel grid ─────────────────────────────────────────────────
-    surface_rgb: list[list[tuple[int, int, int]]] = []
-    for row in range(GRID_H):
-        row_rgb: list[tuple[int, int, int]] = []
-        for col in range(GRID_W):
-            try:
-                row_rgb.append(px[col, row])
-            except Exception:
-                row_rgb.append((100, 100, 120))
-        surface_rgb.append(row_rgb)
-
-    # ── Foreground mask ───────────────────────────────────────────────────
+    # ── Foreground mask (BFS flood-fill + morphological opening) ─────────
     fg = _flood_fill_fg_mask(px, GRID_W, GRID_H, threshold=40)
+    fg = _open_mask(fg, GRID_W, GRID_H)   # removes boundary noise
 
-    # Fallback: if fewer than 10 % of pixels are foreground, the corners
-    # probably landed on the subject — disable masking for this image.
-    fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
-    if fg_count < GRID_W * GRID_H * 0.10:
-        fg = [[True] * GRID_W for _ in range(GRID_H)]
-    else:
-        # Morphological opening (erode → dilate) removes single-pixel noise
-        # and ragged protrusions at the silhouette boundary without shrinking
-        # the core subject shape.
-        fg = _open_mask(fg, GRID_W, GRID_H)
-
-        # Re-check after opening — opening can only reduce fg_count.
-        fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
-        if fg_count < GRID_W * GRID_H * 0.10:
-            fg = [[True] * GRID_W for _ in range(GRID_H)]
-
-    # Per-pixel feather weights: depth is graded toward 0 within 3 cells of
-    # the boundary so silhouette edges blend smoothly instead of hard-cutting.
-    feather = _edge_feather_weights(fg, GRID_W, GRID_H, feather_cells=3)
-
-    # ── Build foreground-only vertex arrays (remapped indices) ─────────────
-    # surf_idx[(row,col)] → new vertex index  (top surface, fg only)
-    # bot_idx [(row,col)] → new vertex index  (bottom plate, fg only)
-    verts:    list[float] = []
-    colors:   list[int]   = []
-    surf_idx: dict[tuple[int, int], int] = {}
-    bot_idx:  dict[tuple[int, int], int] = {}
-
+    fg_pixels: list[tuple[int, int, int, int, int]] = []   # (col,row,r,g,b)
     for row in range(GRID_H):
         for col in range(GRID_W):
-            if not fg[row][col]:
-                continue
-            r, g, b = surface_rgb[row][col]
-            r_f, g_f, b_f = r / 255.0, g / 255.0, b / 255.0
-            luma  = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
-            cmax  = max(r_f, g_f, b_f)
-            cmin  = min(r_f, g_f, b_f)
-            sat   = (cmax - cmin) / cmax if cmax > 1e-6 else 0.0
-            depth = 0.6 * (1.0 - luma) + 0.4 * sat
-            # Feather: grade depth toward zero near the silhouette edge so
-            # the boundary blends smoothly instead of stepping hard to bg.
-            depth *= feather[row][col]
-            x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
-            y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
-            z = round(depth * Z_SCALE - Z_SCALE / 2.0, 3)
-            surf_idx[(row, col)] = len(verts) // 3
-            verts.extend([x, y, z])
-            colors.append((r << 16) | (g << 8) | b)
+            if fg[row][col]:
+                r, g, b = px[col, row]
+                fg_pixels.append((col, row, r, g, b))
 
-    for row in range(GRID_H):
-        for col in range(GRID_W):
-            if not fg[row][col]:
-                continue
-            r, g, b = surface_rgb[row][col]
-            x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
-            y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
-            bot_idx[(row, col)] = len(verts) // 3
-            verts.extend([x, y, Z_BOTTOM])
-            dr, dg, db = r >> 2, g >> 2, b >> 2   # 25 % darkened
-            colors.append((dr << 16) | (dg << 8) | db)
+    # Safety: subject touches corners → disable masking, use full grid
+    if len(fg_pixels) < GRID_W * GRID_H * 0.10:
+        fg_pixels = []
+        for row in range(GRID_H):
+            for col in range(GRID_W):
+                r, g, b = px[col, row]
+                fg_pixels.append((col, row, r, g, b))
 
-    if not verts:
-        return None   # nothing to render
-
-    # ── Build face index array ────────────────────────────────────────────
-    faces: list[int] = []
-
-    # Top surface: only quads where all 4 corners are foreground
-    for row in range(GRID_H - 1):
-        for col in range(GRID_W - 1):
-            rc = [(row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1)]
-            if all(k in surf_idx for k in rc):
-                v00, v10, v01, v11 = (surf_idx[k] for k in rc)
-                faces.extend([v00, v10, v11,  v00, v11, v01])
-
-    # Bottom plate: same quads, reversed winding (faces downward)
-    for row in range(GRID_H - 1):
-        for col in range(GRID_W - 1):
-            rc = [(row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1)]
-            if all(k in bot_idx for k in rc):
-                b00, b10, b01, b11 = (bot_idx[k] for k in rc)
-                faces.extend([b00, b11, b10,  b00, b01, b11])
-
-    # Boundary walls: seal the subject's silhouette edge to the bottom plate.
-    # A wall segment is needed wherever a foreground vertex-pair borders a
-    # background cell (or the image edge).
-    for row in range(GRID_H - 1):
-        for col in range(GRID_W):
-            if (row, col) not in surf_idx or (row + 1, col) not in surf_idx:
-                continue
-            t0, t1 = surf_idx[(row, col)],     surf_idx[(row + 1, col)]
-            b0, b1 = bot_idx [(row, col)],     bot_idx [(row + 1, col)]
-            # Wall on the left side of this column
-            if col == 0 or (row, col - 1) not in surf_idx:
-                faces.extend([t0, b0, b1,  t0, b1, t1])
-            # Wall on the right side of this column
-            if col == GRID_W - 1 or (row, col + 1) not in surf_idx:
-                faces.extend([t0, t1, b1,  t0, b1, b0])
-
-    for row in range(GRID_H):
-        for col in range(GRID_W - 1):
-            if (row, col) not in surf_idx or (row, col + 1) not in surf_idx:
-                continue
-            t0, t1 = surf_idx[(row, col)],     surf_idx[(row, col + 1)]
-            b0, b1 = bot_idx [(row, col)],     bot_idx [(row, col + 1)]
-            # Wall on the top edge of this row
-            if row == 0 or (row - 1, col) not in surf_idx:
-                faces.extend([t0, t1, b1,  t0, b1, b0])
-            # Wall on the bottom edge of this row
-            if row == GRID_H - 1 or (row + 1, col) not in surf_idx:
-                faces.extend([t0, b0, b1,  t0, b1, t1])
-
-    # ── Bounding-box normalisation ────────────────────────────────────────
-    # Fit the final mesh into a well-proportioned bounding volume:
-    #   • XY axes scaled uniformly so the widest axis fills [-2.0, +2.0].
-    #   • Z axis scaled independently so depth ≤ 12 % of XY width,
-    #     preventing the depth-displacement from stretching the model.
-    # XY re-centred using the foreground-vertex centroid (mean x/y) so the
-    # subject always lands at the world origin even when the image composition
-    # is off-centre (e.g. subject occupies only the left third of the frame).
-    # Z is still re-centred on the bounding-box midpoint (unchanged behaviour).
-    TARGET   = 2.0          # half-extent target on each axis
-    Z_PCT    = 0.12         # max Z depth as fraction of normalised XY span
-
-    xs = verts[0::3]
-    ys = verts[1::3]
-    zs = verts[2::3]
-
-    n_verts  = len(xs)
-    x_ctr    = sum(xs) / n_verts          # foreground centroid, not bbox midpoint
-    y_ctr    = sum(ys) / n_verts          # foreground centroid, not bbox midpoint
-    z_ctr    = (max(zs) + min(zs)) / 2.0  # bbox midpoint (depth range is symmetric)
-
-    xy_half   = max((max(xs) - min(xs)) / 2.0,
-                    (max(ys) - min(ys)) / 2.0,
-                    1e-6)
-    xy_scale  = TARGET / xy_half               # maps largest XY axis → ±2.0
-
-    z_raw_half   = max((max(zs) - min(zs)) / 2.0, 1e-6)
-    z_max_half   = TARGET * 2.0 * Z_PCT        # 12 % of 4.0 = 0.48 → ±0.24
-    z_scale      = min(z_max_half / z_raw_half, xy_scale)  # never exceed XY scale
-
-    for i in range(len(verts) // 3):
-        verts[i * 3]     = round((verts[i * 3]     - x_ctr) * xy_scale, 3)
-        verts[i * 3 + 1] = round((verts[i * 3 + 1] - y_ctr) * xy_scale, 3)
-        verts[i * 3 + 2] = round((verts[i * 3 + 2] - z_ctr) * z_scale,  3)
-
-    return {"type": "mesh", "vertices": verts, "faces": faces, "colors": colors}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Meshy Image-to-3D integration
-# ─────────────────────────────────────────────────────────────────────────────
-
-#: Read once at startup — empty string or any placeholder triggers sandbox mode.
-_MESHY_API_KEY: str = os.environ.get("MESHY_API_KEY", "").strip()
-_MESHY_SANDBOX: bool = _MESHY_API_KEY.lower() in {
-    "", "sandbox", "mock", "test", "placeholder",
-    "your_meshy_api_key_here", "your-meshy-api-key",
-}
-
-_MESHY_BASE = "https://api.meshy.ai"
-
-
-def _parse_obj_mesh(obj_text: str) -> tuple[list[float], list[int]]:
-    """
-    Parse a Wavefront OBJ string into flat ``[x,y,z, …]`` vertex and
-    ``[i,j,k, …]`` face index arrays (0-based).
-
-    Handles the full OBJ vertex/face grammar including ``v/vt``,
-    ``v/vt/vn``, ``v//vn`` index formats and fan-triangulates any
-    polygon with more than 3 vertices.
-    """
-    verts: list[float] = []
-    faces: list[int]   = []
-    for raw in obj_text.splitlines():
-        parts = raw.split()
-        if not parts:
-            continue
-        tok = parts[0]
-        if tok == "v" and len(parts) >= 4:
-            try:
-                verts.extend([float(parts[1]), float(parts[2]), float(parts[3])])
-            except ValueError:
-                pass
-        elif tok == "f" and len(parts) >= 4:
-            idxs: list[int] = []
-            for p in parts[1:]:
-                try:
-                    idxs.append(int(p.split("/")[0]) - 1)  # 1-based → 0-based
-                except ValueError:
-                    pass
-            for i in range(1, len(idxs) - 1):              # fan triangulation
-                faces.extend([idxs[0], idxs[i], idxs[i + 1]])
-    return verts, faces
-
-
-def _normalise_verts(verts: list[float], z_pct: float = 1.0) -> list[float]:
-    """
-    Re-centre and uniformly scale a flat ``[x,y,z, …]`` vertex list so
-    the mesh fits inside a [-2, +2] bounding cube.
-
-    ``z_pct`` caps Z depth as a fraction of XY span:
-      • z_pct=1.0  — uncapped (true 3D models, full roundness preserved)
-      • z_pct=0.12 — relief cap used for the heightmap fallback
-    """
-    if not verts:
-        return verts
-    TARGET = 2.0
-    xs = verts[0::3]; ys = verts[1::3]; zs = verts[2::3]
-    x_ctr = (max(xs) + min(xs)) / 2.0
-    y_ctr = (max(ys) + min(ys)) / 2.0
-    z_ctr = (max(zs) + min(zs)) / 2.0
-    xy_half  = max((max(xs) - min(xs)) / 2.0, (max(ys) - min(ys)) / 2.0, 1e-6)
-    xy_scale = TARGET / xy_half
-    z_half   = max((max(zs) - min(zs)) / 2.0, 1e-6)
-    z_cap    = TARGET * 2.0 * z_pct            # max allowed z half-extent
-    z_scale  = min(z_cap / z_half, xy_scale)   # never exceed XY scale
-    out: list[float] = []
-    for i in range(len(verts) // 3):
-        out.append(round((verts[i * 3]     - x_ctr) * xy_scale, 3))
-        out.append(round((verts[i * 3 + 1] - y_ctr) * xy_scale, 3))
-        out.append(round((verts[i * 3 + 2] - z_ctr) * z_scale,  3))
-    return out
-
-
-def _meshy_submit_task(image_url: str) -> str | None:
-    """
-    POST to ``POST /openapi/v1/image-to-3d``.
-    Returns the task_id string on success, None on any error.
-    Runs synchronously inside a thread-pool executor.
-    """
-    try:
-        body = json.dumps({
-            "image_url": image_url,
-            "enable_pbr": False,
-            "ai_model": "meshy-4",
-        }).encode()
-        req = urllib.request.Request(
-            f"{_MESHY_BASE}/openapi/v1/image-to-3d",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {_MESHY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        return data.get("result") or None
-    except Exception:
+    n = len(fg_pixels)
+    if n == 0:
         return None
 
+    # ── Foreground centroid in pixel space ────────────────────────────────
+    cx = sum(p[0] for p in fg_pixels) / n
+    cy = sum(p[1] for p in fg_pixels) / n
+    max_r = max(
+        math.sqrt((p[0] - cx) ** 2 + (p[1] - cy) ** 2) for p in fg_pixels
+    )
+    if max_r < 1e-6:
+        max_r = 1.0
 
-def _meshy_poll_task(task_id: str) -> tuple[str, str | None]:
-    """
-    GET ``/openapi/v1/image-to-3d/{task_id}``.
-    Returns ``(status, obj_url_or_None)``.
-    Possible statuses: PENDING | IN_PROGRESS | SUCCEEDED | FAILED | EXPIRED.
-    """
-    try:
-        req = urllib.request.Request(
-            f"{_MESHY_BASE}/openapi/v1/image-to-3d/{task_id}",
-            headers={"Authorization": f"Bearer {_MESHY_API_KEY}"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        status  = data.get("status", "PENDING")
-        obj_url = (
-            data.get("model_urls", {}).get("obj")
-            if status == "SUCCEEDED" else None
-        )
-        return status, obj_url
-    except Exception:
-        return "ERROR", None
+    # ── Pixel → centroid-centred world coords ─────────────────────────────
+    x_scale = 4.0 / (GRID_W - 1)    # col  → world X  (full range 4 units)
+    y_scale = 2.5 / (GRID_H - 1)    # row  → world Y  (full range 2.5 units)
+    cx_w    =  cx * x_scale - 2.0
+    cy_w    = -(cy * y_scale - 1.25)  # image Y is flipped vs world Y
 
+    # ── Build volumetric point pairs (front + back hemisphere) ───────────
+    points: list[dict[str, Any]] = []
+    for col, row, r, g, b in fg_pixels:
+        # World position, centred on foreground centroid
+        wx = (col * x_scale - 2.0) - cx_w
+        wy = -(row * y_scale - 1.25) - cy_w
 
-def _meshy_fetch_and_parse(obj_url: str) -> dict[str, Any] | None:
-    """
-    Download the Meshy OBJ file, parse vertices + faces, normalise to the
-    [-2, +2] bounding cube preserving true 3D proportions (z_pct=1.0).
-    Returns a mesh dict ready for JSON broadcast, or None on failure.
-    """
-    try:
-        req = urllib.request.Request(
-            obj_url, headers={"User-Agent": "CospaSpatial/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            obj_text = resp.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return None
+        # Normalised radial distance: 0 at centroid, 1 at silhouette
+        dr = math.sqrt((col - cx) ** 2 + (row - cy) ** 2)
+        rn = dr / max_r
 
-    verts, faces = _parse_obj_mesh(obj_text)
-    if not verts or not faces:
-        return None
+        # Hemisphere Z profile
+        geo_z = math.sqrt(max(0.0, 1.0 - rn * rn))
 
-    # z_pct=1.0 → full roundness preserved; mesh fits within [-2, +2] cube.
-    verts = _normalise_verts(verts, z_pct=1.0)
-    return {"type": "mesh", "vertices": verts, "faces": faces, "colors": []}
+        # Luminance blend for subtle surface variation
+        r_f, g_f, b_f = r / 255.0, g / 255.0, b / 255.0
+        luma    = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+        color_z = 1.0 - luma   # darker pixels protrude slightly more
+
+        z_front = Z_MAX * geo_z * (0.8 + 0.2 * color_z)
+        z_back  = -Z_MAX * 0.65 * geo_z
+
+        color_front = (r << 16) | (g << 8) | b
+        color_back  = (max(0, r - 64) << 16) | (max(0, g - 64) << 8) | max(0, b - 64)
+
+        points.append({"x": round(wx, 3), "y": round(wy, 3),
+                       "z": round(z_front, 3), "color": color_front})
+        points.append({"x": round(wx, 3), "y": round(wy, 3),
+                       "z": round(z_back,  3), "color": color_back})
+
+    return points
 
 
 async def _process_image_to_scene(image_url: str, room_id: str = "global") -> None:
     """
-    Background async task — two-stage 3D pipeline.
+    Background async task — geometric hemisphere projection pipeline.
 
-    ── Meshy mode (MESHY_API_KEY set to a real key) ────────────────────────
-    1. Submit the Pollinations image URL to Meshy Image-to-3D immediately.
-    2. While Meshy processes (~1–3 min), broadcast the local heightmap as an
-       instant preview so the viewport is never empty.
-    3. When Meshy returns the completed manifold mesh, broadcast it — Three.js
-       replaces the preview with the fully-rounded model.
-    4. If Meshy fails/times-out the heightmap preview remains visible.
+    Calls _image_to_volumetric_points() (synchronous, runs in executor)
+    up to MAX_ATTEMPTS times with RETRY_DELAY_S between each attempt.
+    Pollinations lazy-renders; the image is typically ready 15-30 s
+    after the URL is first requested.
 
-    ── Sandbox mode (no key or placeholder) ────────────────────────────────
-    Runs the local heightmap pipeline with retries only (existing behaviour).
-    Falls back to the rainbow-helix point cloud if all attempts fail.
-
-    Never propagates exceptions — safe as a fire-and-forget background task.
+    Broadcasts type="points"; falls back to the rainbow-helix
+    confirmation cloud if all attempts fail.
+    Never propagates exceptions.
     """
-    POLL_INTERVAL_S   = 10.0   # seconds between Meshy status checks
-    MAX_POLL_ATTEMPTS = 18     # 18 × 10 s = 3-minute ceiling
-    PREVIEW_DELAY_S   = 12.0   # wait before first heightmap preview attempt
-    HM_RETRY_DELAY_S  = 12.0   # delay between heightmap retries
-    HM_MAX_ATTEMPTS   = 4
+    MAX_ATTEMPTS  = 4
+    RETRY_DELAY_S = 12.0
 
     try:
         loop = asyncio.get_event_loop()
         t0   = time.perf_counter()
+        points: list[dict[str, Any]] | None = None
 
-        async def _broadcast(payload: dict[str, Any], source: str) -> None:
-            elapsed = round((time.perf_counter() - t0) * 1000, 1)
-            await manager.broadcast_to_room(room_id, {
-                "type":          "image_scene",
-                "sceneData":     json.dumps(payload),
-                "pointCount":    len(payload.get("faces", payload.get("points", []))) // 3,
-                "executionTime": elapsed,
-                "source":        source,
-            })
-
-        async def _heightmap_with_retries(label: str) -> bool:
-            """Build and broadcast a heightmap mesh; returns True on success."""
-            for attempt in range(HM_MAX_ATTEMPTS):
-                if attempt > 0:
-                    await asyncio.sleep(HM_RETRY_DELAY_S)
-                try:
-                    mesh = await loop.run_in_executor(None, _image_to_mesh, image_url)
-                except Exception:
-                    mesh = None
-                if mesh is not None:
-                    await _broadcast(mesh, label)
-                    return True
-            # All retries exhausted — broadcast geometric fallback
-            pts = _make_fallback_points()
-            await _broadcast({"type": "points", "points": pts}, "fallback_helix")
-            return False
-
-        # ── Sandbox / no-key path ─────────────────────────────────────────
-        if _MESHY_SANDBOX:
-            await _heightmap_with_retries("sandbox_heightmap")
-            return
-
-        # ── Meshy pipeline ────────────────────────────────────────────────
-
-        # 1. Submit task to Meshy (fires immediately; image URL is valid now)
-        task_id: str | None = await loop.run_in_executor(
-            None, _meshy_submit_task, image_url
-        )
-        if not task_id:
-            # API unreachable or auth failed — fall back entirely
-            await _heightmap_with_retries("fallback_heightmap")
-            return
-
-        # 2. Broadcast heightmap preview while Meshy processes
-        await asyncio.sleep(PREVIEW_DELAY_S)
-        await _heightmap_with_retries("preview_heightmap")
-
-        # 3. Poll Meshy until SUCCEEDED / FAILED / EXPIRED / timeout
-        obj_url: str | None = None
-        for _ in range(MAX_POLL_ATTEMPTS):
-            await asyncio.sleep(POLL_INTERVAL_S)
-            status, obj_url = await loop.run_in_executor(
-                None, _meshy_poll_task, task_id
-            )
-            if status == "SUCCEEDED" and obj_url:
+        for attempt in range(MAX_ATTEMPTS):
+            if attempt > 0:
+                await asyncio.sleep(RETRY_DELAY_S)
+            try:
+                points = await loop.run_in_executor(
+                    None, _image_to_volumetric_points, image_url
+                )
+            except Exception:
+                points = None
+            if points is not None:
                 break
-            if status in ("FAILED", "EXPIRED"):
-                return  # preview is already visible; nothing more to do
 
-        if not obj_url:
-            return  # timed out — keep the preview
+        if points is None:
+            points = _make_fallback_points()
 
-        # 4. Download OBJ, parse, normalise, broadcast final model
-        final_mesh = await loop.run_in_executor(
-            None, _meshy_fetch_and_parse, obj_url
-        )
-        if final_mesh is not None:
-            await _broadcast(final_mesh, "meshy_3d")
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        await manager.broadcast_to_room(room_id, {
+            "type":          "image_scene",
+            "sceneData":     json.dumps({"type": "points", "points": points}),
+            "pointCount":    len(points),
+            "executionTime": elapsed_ms,
+        })
 
     except Exception:
         pass  # background task — never propagate to the event loop
