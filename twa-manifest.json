@@ -1,0 +1,47 @@
+{
+  "packageId": "com.cospatial.app",
+  "host": "replit.dev",
+  "name": "CoSpatial",
+  "launcherName": "CoSpatial",
+  "display": "standalone",
+  "orientation": "default",
+  "themeColor": "#0d1b2a",
+  "navigationColor": "#0d1b2a",
+  "navigationColorDark": "#0d1b2a",
+  "navigationDividerColor": "#0d1b2a",
+  "navigationDividerColorDark": "#0d1b2a",
+  "backgroundColor": "#0d1b2a",
+  "enableNotifications": false,
+  "startUrl": "https://replit.dev/",
+  "iconUrl": "https://replit.dev/icons/icon-512.png",
+  "maskableIconUrl": "https://replit.dev/icons/icon-512-maskable.png",
+  "monochromeIconUrl": "https://replit.dev/icons/icon-512-mono.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "cospatial"
+  },
+  "appVersionCode": 1,
+  "appVersion": "1.0.0",
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://replit.dev/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {
+    "locationDelegation": {
+      "enabled": false
+    },
+    "playBilling": {
+      "enabled": false
+    }
+  },
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://replit.dev/",
+  "minSdkVersion": 19,
+  "fingerprints": []
+}

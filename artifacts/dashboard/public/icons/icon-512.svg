@@ -1,0 +1,30 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" rx="102" fill="#0d1b2a"/>
+
+  <!-- Outer ring – cyan glow -->
+  <circle cx="256" cy="256" r="168" stroke="#00d4ff" stroke-width="8" stroke-opacity="0.25"/>
+
+  <!-- Mid ring -->
+  <circle cx="256" cy="256" r="128" stroke="#00d4ff" stroke-width="4" stroke-opacity="0.45"/>
+
+  <!-- Core accent disc -->
+  <circle cx="256" cy="256" r="72" fill="#FF3C00" fill-opacity="0.92"/>
+
+  <!-- Inner highlight arc (top-left) -->
+  <path d="M 214 210 A 60 60 0 0 1 298 210" stroke="#ffffff" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.35"/>
+
+  <!-- Letter mark: stylised "C·A" ligature -->
+  <!-- C -->
+  <path d="M 228 248 C 228 232 240 222 256 222 C 268 222 278 228 283 237"
+        stroke="#ffffff" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <!-- A -->
+  <path d="M 269 284 L 284 248 L 299 284" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="274" y1="270" x2="294" y2="270" stroke="#ffffff" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Dot grid – collaboration nodes -->
+  <circle cx="256" cy="148" r="6" fill="#00d4ff" opacity="0.7"/>
+  <circle cx="364" cy="256" r="6" fill="#00d4ff" opacity="0.7"/>
+  <circle cx="256" cy="364" r="6" fill="#00d4ff" opacity="0.5"/>
+  <circle cx="148" cy="256" r="6" fill="#00d4ff" opacity="0.5"/>
+</svg>
