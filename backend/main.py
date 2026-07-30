@@ -817,3 +817,228 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PYTHON_PORT", "8001"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
+def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
+    """
+    Synchronous helper (runs in a thread-pool executor).
+
+    Converts the rendered Pollinations image into a **solid closed 3D mesh**
+    of the main subject only — background pixels are excluded entirely.
+
+    Pipeline
+    --------
+    1. Fetch + resize to GRID_W × GRID_H.
+    2. BFS flood-fill from the 4 corners to build a foreground mask that
+       isolates the main subject (works well for AI concept art with white
+       or soft-gradient backgrounds).  Falls back to the full grid if fewer
+       than 10 % of pixels are detected as foreground (robust against edge
+       cases where the subject touches all corners).
+    3. Remap vertex indices — only foreground pixels become vertices so the
+       output mesh contains zero background geometry.
+    4. Depth driver per foreground vertex:
+           depth = 0.6 × (1 − luma) + 0.4 × saturation
+       Subject colour and dark edges protrude forward; no white floor.
+    5. Bottom plate + boundary walls are added only for foreground cells,
+       sealing the subject into a fully closed solid manifold.
+
+    Colors: packed (r<<16|g<<8|b); frontend unpacks to BufferAttribute.
+    Returns None when the image is unavailable / not yet rendered.
+    """
+    GRID_W, GRID_H = 64, 40
+    Z_SCALE  = 4.0   # surface z range: [−2.0, +2.0]
+    Z_BOTTOM = -2.8  # bottom plate z
+
+    if not _PIL_AVAILABLE:
+        return None
+
+    # ── Fetch ─────────────────────────────────────────────────────────────
+    try:
+        req = urllib.request.Request(
+            image_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CospaSpatial/1.0)"},
+        )
+        with urllib.request.urlopen(req, timeout=38) as resp:
+            raw_bytes = resp.read()
+        if len(raw_bytes) < 1024:
+            return None  # stub / not ready → caller retries
+    except Exception:
+        return None
+
+    # ── Decode & resample ─────────────────────────────────────────────────
+    try:
+        img = _PILImage.open(io.BytesIO(raw_bytes)).convert("RGB")
+        img = img.resize((GRID_W, GRID_H), _PILImage.LANCZOS)
+        px = img.load()
+    except Exception:
+        return None
+
+    # ── Sample pixel grid ─────────────────────────────────────────────────
+    surface_rgb: list[list[tuple[int, int, int]]] = []
+    for row in range(GRID_H):
+        row_rgb: list[tuple[int, int, int]] = []
+        for col in range(GRID_W):
+            try:
+                row_rgb.append(px[col, row])
+            except Exception:
+                row_rgb.append((100, 100, 120))
+        surface_rgb.append(row_rgb)
+
+    # ── Foreground mask ───────────────────────────────────────────────────
+    fg = _flood_fill_fg_mask(px, GRID_W, GRID_H, threshold=40)
+
+    # Fallback: if fewer than 10 % of pixels are foreground, the corners
+    # probably landed on the subject — disable masking for this image.
+    fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
+    if fg_count < GRID_W * GRID_H * 0.10:
+        fg = [[True] * GRID_W for _ in range(GRID_H)]
+    else:
+        # Morphological opening (erode → dilate) removes single-pixel noise
+        # and ragged protrusions at the silhouette boundary without shrinking
+        # the core subject shape.
+        fg = _open_mask(fg, GRID_W, GRID_H)
+
+        # Re-check after opening — opening can only reduce fg_count.
+        fg_count = sum(fg[r][c] for r in range(GRID_H) for c in range(GRID_W))
+        if fg_count < GRID_W * GRID_H * 0.10:
+            fg = [[True] * GRID_W for _ in range(GRID_H)]
+
+    # Per-pixel feather weights: depth is graded toward 0 within 3 cells of
+    # the boundary so silhouette edges blend smoothly instead of hard-cutting.
+    feather = _edge_feather_weights(fg, GRID_W, GRID_H, feather_cells=3)
+
+    # ── Build foreground-only vertex arrays (remapped indices) ─────────────
+    # surf_idx[(row,col)] → new vertex index  (top surface, fg only)
+    # bot_idx [(row,col)] → new vertex index  (bottom plate, fg only)
+    verts:    list[float] = []
+    colors:   list[int]   = []
+    surf_idx: dict[tuple[int, int], int] = {}
+    bot_idx:  dict[tuple[int, int], int] = {}
+
+    for row in range(GRID_H):
+        for col in range(GRID_W):
+            if not fg[row][col]:
+                continue
+            r, g, b = surface_rgb[row][col]
+            r_f, g_f, b_f = r / 255.0, g / 255.0, b / 255.0
+            luma  = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+            cmax  = max(r_f, g_f, b_f)
+            cmin  = min(r_f, g_f, b_f)
+            sat   = (cmax - cmin) / cmax if cmax > 1e-6 else 0.0
+            depth = 0.6 * (1.0 - luma) + 0.4 * sat
+            # Feather: grade depth toward zero near the silhouette edge so
+            # the boundary blends smoothly instead of stepping hard to bg.
+            depth *= feather[row][col]
+            x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
+            y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
+            z = round(depth * Z_SCALE - Z_SCALE / 2.0, 3)
+            surf_idx[(row, col)] = len(verts) // 3
+            verts.extend([x, y, z])
+            colors.append((r << 16) | (g << 8) | b)
+
+    for row in range(GRID_H):
+        for col in range(GRID_W):
+            if not fg[row][col]:
+                continue
+            r, g, b = surface_rgb[row][col]
+            x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
+            y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
+            bot_idx[(row, col)] = len(verts) // 3
+            verts.extend([x, y, Z_BOTTOM])
+            dr, dg, db = r >> 2, g >> 2, b >> 2   # 25 % darkened
+            colors.append((dr << 16) | (dg << 8) | db)
+
+    if not verts:
+        return None   # nothing to render
+
+    # ── Build face index array ────────────────────────────────────────────
+    faces: list[int] = []
+
+    # Top surface: only quads where all 4 corners are foreground
+    for row in range(GRID_H - 1):
+        for col in range(GRID_W - 1):
+            rc = [(row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1)]
+            if all(k in surf_idx for k in rc):
+                v00, v10, v01, v11 = (surf_idx[k] for k in rc)
+                faces.extend([v00, v10, v11,  v00, v11, v01])
+
+    # Bottom plate: same quads, reversed winding (faces downward)
+    for row in range(GRID_H - 1):
+        for col in range(GRID_W - 1):
+            rc = [(row, col), (row, col + 1), (row + 1, col), (row + 1, col + 1)]
+            if all(k in bot_idx for k in rc):
+                b00, b10, b01, b11 = (bot_idx[k] for k in rc)
+                faces.extend([b00, b11, b10,  b00, b01, b11])
+
+    # Boundary walls: seal the subject's silhouette edge to the bottom plate.
+    # A wall segment is needed wherever a foreground vertex-pair borders a
+    # background cell (or the image edge).
+    for row in range(GRID_H - 1):
+        for col in range(GRID_W):
+            if (row, col) not in surf_idx or (row + 1, col) not in surf_idx:
+                continue
+            t0, t1 = surf_idx[(row, col)],     surf_idx[(row + 1, col)]
+            b0, b1 = bot_idx [(row, col)],     bot_idx [(row + 1, col)]
+            # Wall on the left side of this column
+            if col == 0 or (row, col - 1) not in surf_idx:
+                faces.extend([t0, b0, b1,  t0, b1, t1])
+            # Wall on the right side of this column
+            if col == GRID_W - 1 or (row, col + 1) not in surf_idx:
+                faces.extend([t0, t1, b1,  t0, b1, b0])
+
+    for row in range(GRID_H):
+        for col in range(GRID_W - 1):
+            if (row, col) not in surf_idx or (row, col + 1) not in surf_idx:
+                continue
+            t0, t1 = surf_idx[(row, col)],     surf_idx[(row, col + 1)]
+            b0, b1 = bot_idx [(row, col)],     bot_idx [(row, col + 1)]
+            # Wall on the top edge of this row
+            if row == 0 or (row - 1, col) not in surf_idx:
+                faces.extend([t0, t1, b1,  t0, b1, b0])
+            # Wall on the bottom edge of this row
+            if row == GRID_H - 1 or (row + 1, col) not in surf_idx:
+                faces.extend([t0, b0, b1,  t0, b1, t1])
+
+    # ── Bounding-box normalisation ────────────────────────────────────────
+    # Fit the final mesh into a well-proportioned bounding volume:
+    #   • X and Y axes scaled INDEPENDENTLY so each fills [-2.0, +2.0].
+    #     This compensates for the landscape grid (64×40) distorting portrait
+    #     images: a tall subject's foreground spans more rows than columns in
+    #     pixel space, but the raw x coords span 4.8 units vs 3.0 for y —
+    #     uniform "widest axis" scaling would still let x dominate for many
+    #     portrait subjects.  Per-axis scaling ensures portrait subjects fill
+    #     the vertical viewport extent and landscape subjects fill horizontal.
+    #   • Z axis scaled independently so depth ≤ 12 % of the smaller XY
+    #     half-extent, preventing the depth-displacement from over-stretching.
+    # XY re-centred using the foreground-vertex centroid (mean x/y) so the
+    # subject always lands at the world origin even when the image composition
+    # is off-centre (e.g. subject occupies only the left third of the frame).
+    # Z is still re-centred on the bounding-box midpoint (unchanged behaviour).
+    TARGET   = 2.0          # half-extent target on each axis
+    Z_PCT    = 0.12         # max Z depth as fraction of normalised XY span
+
+    xs = verts[0::3]
+    ys = verts[1::3]
+    zs = verts[2::3]
+
+    n_verts  = len(xs)
+    x_ctr    = sum(xs) / n_verts          # foreground centroid, not bbox midpoint
+    y_ctr    = sum(ys) / n_verts          # foreground centroid, not bbox midpoint
+    z_ctr    = (max(zs) + min(zs)) / 2.0  # bbox midpoint (depth range is symmetric)
+
+    x_half    = max((max(xs) - min(xs)) / 2.0, 1e-6)
+    y_half    = max((max(ys) - min(ys)) / 2.0, 1e-6)
+    x_scale   = TARGET / x_half               # maps x foreground extent → ±2.0
+    y_scale   = TARGET / y_half               # maps y foreground extent → ±2.0
+
+    z_raw_half   = max((max(zs) - min(zs)) / 2.0, 1e-6)
+    z_max_half   = TARGET * 2.0 * Z_PCT        # 12 % of 4.0 = 0.48 → ±0.24
+    # Cap z by the smaller of the two XY scales so depth stays proportional
+    # to whichever axis is more constrained.
+    z_scale      = min(z_max_half / z_raw_half, min(x_scale, y_scale))
+
+    for i in range(len(verts) // 3):
+        verts[i * 3]     = round((verts[i * 3]     - x_ctr) * x_scale, 3)
+        verts[i * 3 + 1] = round((verts[i * 3 + 1] - y_ctr) * y_scale, 3)
+        verts[i * 3 + 2] = round((verts[i * 3 + 2] - z_ctr) * z_scale,  3)
+
+    return {"type": "mesh", "vertices": verts, "faces": faces, "colors": colors}
