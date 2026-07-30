@@ -4,6 +4,9 @@ const config: CapacitorConfig = {
   appId: 'com.cospatial.app',
   appName: 'CoSpatial',
   webDir: 'dist/public',
+  server: {
+    allowMixedContent: true
+  },
   plugins: {
     SplashScreen: {
       launchShowDuration: 3000,
