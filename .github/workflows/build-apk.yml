@@ -21,10 +21,10 @@ jobs:
         uses: actions/checkout@v4
 
       # ── 2. JDK ──────────────────────────────────────────────────────────────
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
       # ── 3. pnpm (pinned to match lockfile) + Node.js ────────────────────────
