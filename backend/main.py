@@ -349,12 +349,18 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
 
     Geometry
     --------
-    • Top surface  : GRID_W × GRID_H vertices, z = luminance displacement
-                     so bright pixels extrude toward the camera and dark
-                     pixels recede, forming a relief-sculpture landscape.
-    • Bottom plate : same XY grid at a fixed z_bottom, creating a flat floor.
-    • 4 side walls : connect each edge of the top surface to the bottom,
-                     sealing the object into a fully closed solid manifold.
+    • Top surface  : GRID_W × GRID_H vertices (64×40 = 2 560 surface points).
+                     Depth is driven by an inverted-luma + saturation blend
+                     so subject content protrudes toward the camera while the
+                     white/neutral background recedes:
+                         depth = 0.6 × (1 − luma/255) + 0.4 × saturation
+                     This ensures coloured, textured pixels (the monkey,
+                     the bike, etc.) are always the highest points of the
+                     mesh regardless of their absolute brightness.
+    • Bottom plate : same XY grid at a fixed z_bottom (-2.8), creating a
+                     flat floor that seals the solid from below.
+    • 4 side walls : front/back/left/right connect each surface edge to
+                     the bottom, forming a fully closed solid manifold.
 
     Each quad (top, bottom, walls) is triangulated into 2 CCW triangles.
     `THREE.DoubleSide` material makes winding order irrelevant for display.
@@ -362,7 +368,7 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     Colors
     ------
     Top vertices carry the original pixel RGB packed as a single integer
-    `(r<<16 | g<<8 | b)`.  Bottom/wall vertices carry a darkened (25%)
+    `(r<<16 | g<<8 | b)`.  Bottom/wall vertices carry a 25%-darkened
     version of the nearest surface pixel.  The frontend unpacks these into
     a per-vertex color `BufferAttribute`.
 
@@ -372,9 +378,9 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     ``None`` when the image is unavailable / not yet rendered by Pollinations
     (caller should retry).
     """
-    GRID_W, GRID_H = 48, 30
-    Z_SCALE  = 3.0   # surface z range: [-1.5, +1.5]
-    Z_BOTTOM = -2.2  # flat bottom plate, below all surface geometry
+    GRID_W, GRID_H = 64, 40
+    Z_SCALE  = 4.0   # surface z range: [-2.0, +2.0]
+    Z_BOTTOM = -2.8  # flat bottom plate, below all surface geometry
 
     if not _PIL_AVAILABLE:
         return None
@@ -427,10 +433,22 @@ def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     for row in range(GRID_H):
         for col in range(GRID_W):
             r, g, b = surface_rgb[row][col]
-            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            r_f, g_f, b_f = r / 255.0, g / 255.0, b / 255.0
+            luma = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+
+            # Colour saturation (HSV S component, 0=grey, 1=fully saturated)
+            cmax = max(r_f, g_f, b_f)
+            cmin = min(r_f, g_f, b_f)
+            saturation = (cmax - cmin) / cmax if cmax > 1e-6 else 0.0
+
+            # Depth driver: subject content (dark edges + saturated colour)
+            # protrudes toward the camera; white/neutral background recedes.
+            #   inv_luma = 1 for black, 0 for white
+            #   saturation = 0 for grey/white, 1 for vivid colour
+            depth = 0.6 * (1.0 - luma) + 0.4 * saturation
             x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
             y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
-            z = round((luma / 255.0) * Z_SCALE - Z_SCALE / 2.0, 3)
+            z = round(depth * Z_SCALE - Z_SCALE / 2.0, 3)
             verts.extend([x, y, z])
             colors.append((r << 16) | (g << 8) | b)
 
