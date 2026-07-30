@@ -40,3 +40,15 @@ run = "sh -c 'cd /home/runner/workspace && python3 backend/main.py'"
 
 [services.development.env]
 PYTHON_PORT = "8001"
+
+[services.production]
+
+[services.production.run]
+args = ["python3", "backend/main.py"]
+
+[services.production.run.env]
+PORT = "8001"
+PYTHON_PORT = "8001"
+
+[services.production.health.startup]
+path = "/python-api/healthz"
