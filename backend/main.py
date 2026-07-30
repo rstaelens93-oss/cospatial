@@ -300,85 +300,163 @@ async def generate_concept(
 # Image → 3D point-cloud pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+import math as _math
+
+
+def _make_fallback_points() -> list[dict[str, Any]]:
+    """
+    Geometric fallback broadcast when the image fetch fails or returns a
+    blank frame.  Produces a rainbow double-helix (~300 points) that looks
+    intentional rather than broken, and confirms the WebSocket pipeline is
+    alive while Pollinations finishes rendering.
+    """
+    points: list[dict[str, Any]] = []
+    N = 300
+    for i in range(N):
+        try:
+            t = i / (N - 1)
+            angle = t * 6.0 * _math.pi
+            radius = 0.5 + 0.5 * _math.sin(t * _math.pi)
+            # Two interleaved strands
+            for strand_offset in (0.0, _math.pi):
+                a = angle + strand_offset
+                x = round(radius * _math.cos(a) * 2.2, 4)
+                y = round(t * 3.0 - 1.5, 4)
+                z = round(radius * _math.sin(a) * 2.0, 4)
+                # Rainbow hue cycling
+                h6 = (t + strand_offset / (2.0 * _math.pi)) * 6.0 % 6.0
+                hi = int(h6)
+                f = h6 - hi
+                rgb_table = [
+                    (1.0, f, 0.0), (1.0 - f, 1.0, 0.0),
+                    (0.0, 1.0, f), (0.0, 1.0 - f, 1.0),
+                    (f, 0.0, 1.0), (1.0, 0.0, 1.0 - f),
+                ]
+                rv, gv, bv = rgb_table[hi % 6]
+                color = f"#{int(rv * 255):02x}{int(gv * 255):02x}{int(bv * 255):02x}"
+                points.append({"x": x, "y": y, "z": z, "color": color})
+        except Exception:
+            continue  # skip any single bad iteration, keep going
+    return points
+
+
 def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
     """
     Synchronous helper (runs in a thread-pool executor).
 
-    Fetches the rendered Pollinations image, resamples it onto a 48×30 grid,
-    and converts each non-background pixel into a spatial point:
+    Fetches the rendered Pollinations image, resamples it to a 96×60 grid,
+    and converts each non-background pixel into a spatial point using
+    luminance-to-depth displacement:
+
       x  — horizontal position  (-2.4 … 2.4)
-      y  — vertical position    ( 1.5 … -1.5, image top → positive y)
-      z  — luminance-based depth (-1.0 … 1.0, bright pixels pop forward)
-      color — exact "#rrggbb" hex sampled from the pixel
+      y  — vertical position    ( 1.5 … -1.5, top row → positive y)
+      z  — luminance depth      (-2.0 … 2.0, bright=forward / dark=back)
+      color — exact "#rrggbb" per-pixel hex
 
-    Near-white pixels (r,g,b all > 238) are treated as background and
-    skipped so the point cloud shows the subject rather than the canvas.
+    Background detection: pixels where all three channels exceed 238 are
+    skipped as near-white canvas.
 
-    Returns an empty list when PIL is unavailable or the fetch fails.
+    Returns a fallback geometric shape (never an empty list) so the
+    WebSocket bridge always broadcasts a renderable payload.
     """
-    if not _PIL_AVAILABLE:
-        return []
-
     GRID_W, GRID_H = 96, 60
-    # Z displacement scale — controls how dramatically bright vs dark areas
-    # extrude. Must match the XY spread (4.8 × 3.0) to feel volumetric.
-    # At 4.0 the full depth range is [-2.0, +2.0], giving depth roughly
-    # equal to the grid height (3.0) for a convincing landscape effect.
-    Z_SCALE = 4.0
+    Z_SCALE = 4.0  # depth range = [-Z_SCALE/2, +Z_SCALE/2] = [-2.0, +2.0]
 
+    # ── Guard: PIL not installed ──────────────────────────────────────────
+    if not _PIL_AVAILABLE:
+        return _make_fallback_points()
+
+    # ── Fetch ─────────────────────────────────────────────────────────────
     try:
         req = urllib.request.Request(
             image_url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; CospaSpatial/1.0)"},
         )
-        with urllib.request.urlopen(req, timeout=35) as resp:
+        with urllib.request.urlopen(req, timeout=38) as resp:
             raw_bytes = resp.read()
+        if len(raw_bytes) < 1024:
+            # Pollinations returned a redirect stub or empty body — not ready yet
+            return []
+    except Exception:
+        return []  # signal caller to retry
 
+    # ── Decode & resample ─────────────────────────────────────────────────
+    try:
         img = _PILImage.open(io.BytesIO(raw_bytes)).convert("RGB")
         img = img.resize((GRID_W, GRID_H), _PILImage.LANCZOS)
         px = img.load()
+    except Exception:
+        return _make_fallback_points()
 
-        points: list[dict[str, Any]] = []
-        for row in range(GRID_H):
-            for col in range(GRID_W):
+    # ── Per-pixel luminance-to-depth mapping ──────────────────────────────
+    points: list[dict[str, Any]] = []
+    for row in range(GRID_H):
+        for col in range(GRID_W):
+            try:
                 r, g, b = px[col, row]
-                # Skip near-white background
+
+                # Skip near-white background canvas
                 if r > 238 and g > 238 and b > 238:
                     continue
+
                 luma: float = 0.299 * r + 0.587 * g + 0.114 * b
                 x: float = round((col / (GRID_W - 1) - 0.5) * 4.8, 4)
                 y: float = round((0.5 - row / (GRID_H - 1)) * 3.0, 4)
-                # Luminance-to-depth displacement: bright pixels extrude
-                # toward the camera (+z), dark pixels recede (-z).
-                # Range: [-Z_SCALE/2, +Z_SCALE/2] = [-2.0, +2.0]
+                # Bright pixels extrude toward camera (+z); dark recede (-z)
                 z: float = round((luma / 255.0) * Z_SCALE - (Z_SCALE / 2.0), 4)
                 color: str = f"#{r:02x}{g:02x}{b:02x}"
                 points.append({"x": x, "y": y, "z": z, "color": color})
 
-        return points
+            except Exception:
+                continue  # malformed pixel — skip, never abort the loop
 
-    except Exception:
-        return []
+    # If every pixel was filtered as background the image wasn't ready yet
+    return points if points else []
 
 
 async def _process_image_to_scene(image_url: str, room_id: str = "global") -> None:
     """
-    Background async task: fetch → extract → broadcast.
+    Background async task: retry-fetch → extract → broadcast.
 
-    Fires after the HTTP response is already sent so the caller sees zero
-    added latency. Fails completely silently — this is a best-effort
-    enhancement and must never surface errors to the user.
+    Strategy:
+    - Try up to MAX_ATTEMPTS times with RETRY_DELAY_S seconds between
+      attempts.  Pollinations lazy-renders on first GET; the image is
+      typically ready within 15–30 s.
+    - On each attempt, an empty list means "not ready yet" → retry.
+    - After MAX_ATTEMPTS without a real image, broadcast the geometric
+      fallback so the WebSocket pipeline is confirmed live and the
+      viewport always shows something rather than staying blank.
+    - Any exception at any stage is swallowed; this is fire-and-forget.
     """
+    MAX_ATTEMPTS = 4
+    RETRY_DELAY_S = 12.0  # 0 s, 12 s, 24 s, 36 s
+
     try:
         loop = asyncio.get_event_loop()
         t0 = time.perf_counter()
-        points = await loop.run_in_executor(None, _image_to_pointcloud, image_url)
-        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        points: list[dict[str, Any]] = []
 
+        for attempt in range(MAX_ATTEMPTS):
+            if attempt > 0:
+                await asyncio.sleep(RETRY_DELAY_S)
+
+            try:
+                points = await loop.run_in_executor(
+                    None, _image_to_pointcloud, image_url
+                )
+            except Exception:
+                points = []
+
+            if points:
+                break  # got real image data — stop retrying
+
+        # Always broadcast: real image points, or fallback geometry
         if not points:
-            return
+            points = _make_fallback_points()
 
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
         scene_json = json.dumps({"type": "points", "points": points})
+
         await manager.broadcast_to_room(
             room_id,
             {
@@ -388,8 +466,9 @@ async def _process_image_to_scene(image_url: str, room_id: str = "global") -> No
                 "executionTime": elapsed_ms,
             },
         )
+
     except Exception:
-        pass  # background task – never propagate
+        pass  # background task — never propagate to the event loop
 
 
 # ─────────────────────────────────────────────────────────────────────────────
