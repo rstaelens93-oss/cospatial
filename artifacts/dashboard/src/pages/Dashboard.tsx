@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import type { Concept } from "@workspace/api-client-react";
 import ConceptPanel from "@/components/panels/ConceptPanel";
 import PythonPanel from "@/components/panels/PythonPanel";
@@ -84,21 +84,45 @@ function PanelHeader({ icon, title, status = "idle", badge }: PanelHeaderProps) 
 
 export default function Dashboard() {
   const [latestConcept, setLatestConcept] = useState<Concept | null>(null);
+  const [liveImageUrl, setLiveImageUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [sceneData, setSceneData] = useState<string | null>(null);
   const [conceptPanelStatus, setConceptPanelStatus] = useState<"active" | "idle" | "processing">("idle");
   const [pythonPanelStatus, setPythonPanelStatus] = useState<"active" | "idle" | "processing">("idle");
 
-  const handleConceptGenerated = (concept: Concept) => {
+  const handleConceptGenerated = useCallback((concept: Concept) => {
     setLatestConcept(concept);
-    setIsGenerating(false);
+    setIsGenerating(true);   // show loading while image fetches
+    setLiveImageUrl(null);
     setConceptPanelStatus("active");
-  };
+
+    // Fire-and-forget: fetch the Pollinations image URL for this concept's prompt.
+    fetch("/api/image/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: concept.prompt }),
+    })
+      .then((res) => res.json())
+      .then((data: { imageUrl?: string }) => {
+        if (data.imageUrl) setLiveImageUrl(data.imageUrl);
+      })
+      .catch(() => {
+        // Non-fatal — ImagePanel will fall back to the text prompt card.
+      })
+      .finally(() => {
+        setIsGenerating(false);
+      });
+  }, []);
 
   const handleSceneData = (data: string) => {
     setSceneData(data);
     setPythonPanelStatus("active");
   };
+
+  // Merge the live Pollinations URL into the concept object ImagePanel receives.
+  const displayConcept = latestConcept
+    ? { ...latestConcept, imageUrl: liveImageUrl }
+    : null;
 
   return (
     <div className="flex flex-col min-h-[100dvh] w-full overflow-hidden" style={{ background: "hsl(215 28% 7%)" }}>
@@ -228,10 +252,7 @@ export default function Dashboard() {
           />
           <div className="flex-1 min-h-0 overflow-hidden">
             <ConceptPanel
-              onConceptGenerated={(c) => {
-                setIsGenerating(false);
-                handleConceptGenerated(c);
-              }}
+              onConceptGenerated={handleConceptGenerated}
               latestConcept={latestConcept}
             />
           </div>
@@ -246,10 +267,10 @@ export default function Dashboard() {
             icon={<Image size={11} style={{ color: "#00d4ff" }} />}
             title="Generated Image"
             status={isGenerating ? "processing" : latestConcept ? "active" : "idle"}
-            badge={latestConcept?.imageUrl ? "IMAGE" : latestConcept ? "PROMPT" : undefined}
+            badge={liveImageUrl ? "IMAGE" : latestConcept ? "PROMPT" : undefined}
           />
           <div className="flex-1 min-h-0 overflow-hidden relative">
-            <ImagePanel concept={latestConcept} isGenerating={isGenerating} />
+            <ImagePanel concept={displayConcept} isGenerating={isGenerating} />
           </div>
         </div>
 
