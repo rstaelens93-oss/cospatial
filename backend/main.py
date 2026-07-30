@@ -340,31 +340,44 @@ def _make_fallback_points() -> list[dict[str, Any]]:
     return points
 
 
-def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
+def _image_to_mesh(image_url: str) -> dict[str, Any] | None:
     """
     Synchronous helper (runs in a thread-pool executor).
 
-    Fetches the rendered Pollinations image, resamples it to a 96×60 grid,
-    and converts each non-background pixel into a spatial point using
-    luminance-to-depth displacement:
+    Converts the rendered Pollinations image into a **solid closed 3D mesh**
+    using luminance-to-depth heightmap displacement:
 
-      x  — horizontal position  (-2.4 … 2.4)
-      y  — vertical position    ( 1.5 … -1.5, top row → positive y)
-      z  — luminance depth      (-2.0 … 2.0, bright=forward / dark=back)
-      color — exact "#rrggbb" per-pixel hex
+    Geometry
+    --------
+    • Top surface  : GRID_W × GRID_H vertices, z = luminance displacement
+                     so bright pixels extrude toward the camera and dark
+                     pixels recede, forming a relief-sculpture landscape.
+    • Bottom plate : same XY grid at a fixed z_bottom, creating a flat floor.
+    • 4 side walls : connect each edge of the top surface to the bottom,
+                     sealing the object into a fully closed solid manifold.
 
-    Background detection: pixels where all three channels exceed 238 are
-    skipped as near-white canvas.
+    Each quad (top, bottom, walls) is triangulated into 2 CCW triangles.
+    `THREE.DoubleSide` material makes winding order irrelevant for display.
 
-    Returns a fallback geometric shape (never an empty list) so the
-    WebSocket bridge always broadcasts a renderable payload.
+    Colors
+    ------
+    Top vertices carry the original pixel RGB packed as a single integer
+    `(r<<16 | g<<8 | b)`.  Bottom/wall vertices carry a darkened (25%)
+    version of the nearest surface pixel.  The frontend unpacks these into
+    a per-vertex color `BufferAttribute`.
+
+    Returns
+    -------
+    dict with keys ``type``, ``vertices``, ``faces``, ``colors``, or
+    ``None`` when the image is unavailable / not yet rendered by Pollinations
+    (caller should retry).
     """
-    GRID_W, GRID_H = 96, 60
-    Z_SCALE = 4.0  # depth range = [-Z_SCALE/2, +Z_SCALE/2] = [-2.0, +2.0]
+    GRID_W, GRID_H = 48, 30
+    Z_SCALE  = 3.0   # surface z range: [-1.5, +1.5]
+    Z_BOTTOM = -2.2  # flat bottom plate, below all surface geometry
 
-    # ── Guard: PIL not installed ──────────────────────────────────────────
     if not _PIL_AVAILABLE:
-        return _make_fallback_points()
+        return None
 
     # ── Fetch ─────────────────────────────────────────────────────────────
     try:
@@ -375,10 +388,9 @@ def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
         with urllib.request.urlopen(req, timeout=38) as resp:
             raw_bytes = resp.read()
         if len(raw_bytes) < 1024:
-            # Pollinations returned a redirect stub or empty body — not ready yet
-            return []
+            return None  # stub / not ready → caller retries
     except Exception:
-        return []  # signal caller to retry
+        return None
 
     # ── Decode & resample ─────────────────────────────────────────────────
     try:
@@ -386,83 +398,157 @@ def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
         img = img.resize((GRID_W, GRID_H), _PILImage.LANCZOS)
         px = img.load()
     except Exception:
-        return _make_fallback_points()
+        return None
 
-    # ── Per-pixel luminance-to-depth mapping ──────────────────────────────
-    points: list[dict[str, Any]] = []
+    # ── Sample pixel grid ─────────────────────────────────────────────────
+    # surface_rgb[row][col] = (r, g, b)  — sampled once, used for both
+    # surface vertices and darkened bottom/wall vertices.
+    surface_rgb: list[list[tuple[int, int, int]]] = []
     for row in range(GRID_H):
+        row_rgb: list[tuple[int, int, int]] = []
         for col in range(GRID_W):
             try:
-                r, g, b = px[col, row]
-
-                # Skip near-white background canvas
-                if r > 238 and g > 238 and b > 238:
-                    continue
-
-                luma: float = 0.299 * r + 0.587 * g + 0.114 * b
-                x: float = round((col / (GRID_W - 1) - 0.5) * 4.8, 4)
-                y: float = round((0.5 - row / (GRID_H - 1)) * 3.0, 4)
-                # Bright pixels extrude toward camera (+z); dark recede (-z)
-                z: float = round((luma / 255.0) * Z_SCALE - (Z_SCALE / 2.0), 4)
-                color: str = f"#{r:02x}{g:02x}{b:02x}"
-                points.append({"x": x, "y": y, "z": z, "color": color})
-
+                row_rgb.append(px[col, row])
             except Exception:
-                continue  # malformed pixel — skip, never abort the loop
+                row_rgb.append((100, 100, 120))
+        surface_rgb.append(row_rgb)
 
-    # If every pixel was filtered as background the image wasn't ready yet
-    return points if points else []
+    # ── Build vertex + color arrays ───────────────────────────────────────
+    # Layout:
+    #   indices 0 .. N_SURFACE-1        — top surface vertices
+    #   indices N_SURFACE .. 2*N-1      — bottom plate vertices
+    N_SURFACE = GRID_W * GRID_H
+    OFF       = N_SURFACE  # bottom layer index offset
+
+    verts:  list[float] = []
+    colors: list[int]   = []
+
+    # Top surface
+    for row in range(GRID_H):
+        for col in range(GRID_W):
+            r, g, b = surface_rgb[row][col]
+            luma = 0.299 * r + 0.587 * g + 0.114 * b
+            x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
+            y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
+            z = round((luma / 255.0) * Z_SCALE - Z_SCALE / 2.0, 3)
+            verts.extend([x, y, z])
+            colors.append((r << 16) | (g << 8) | b)
+
+    # Bottom plate (same XY, fixed z, darkened color)
+    for row in range(GRID_H):
+        for col in range(GRID_W):
+            r, g, b = surface_rgb[row][col]
+            x = round((col / (GRID_W - 1) - 0.5) * 4.8, 3)
+            y = round((0.5 - row / (GRID_H - 1)) * 3.0, 3)
+            verts.extend([x, y, Z_BOTTOM])
+            dr, dg, db = r >> 2, g >> 2, b >> 2  # darken to 25 %
+            colors.append((dr << 16) | (dg << 8) | db)
+
+    # ── Build face index array ────────────────────────────────────────────
+    faces: list[int] = []
+
+    def _quad(a: int, b_: int, c: int, d: int, reverse: bool = False) -> None:
+        """Append 2 CCW triangles for quad (a, b, c, d)."""
+        if reverse:
+            faces.extend([a, c, b_,  a, d, c])
+        else:
+            faces.extend([a, b_, c,  a, c, d])
+
+    # Top surface quads
+    for row in range(GRID_H - 1):
+        for col in range(GRID_W - 1):
+            v00 = row * GRID_W + col
+            v10 = row * GRID_W + (col + 1)
+            v01 = (row + 1) * GRID_W + col
+            v11 = (row + 1) * GRID_W + (col + 1)
+            _quad(v00, v10, v11, v01)
+
+    # Bottom plate quads (reversed winding to face downward)
+    for row in range(GRID_H - 1):
+        for col in range(GRID_W - 1):
+            b00 = OFF + row * GRID_W + col
+            b10 = OFF + row * GRID_W + (col + 1)
+            b01 = OFF + (row + 1) * GRID_W + col
+            b11 = OFF + (row + 1) * GRID_W + (col + 1)
+            _quad(b00, b10, b11, b01, reverse=True)
+
+    # Front wall (row = 0, y = +1.5)
+    for col in range(GRID_W - 1):
+        t0, t1 = col, col + 1
+        b0, b1 = OFF + col, OFF + col + 1
+        _quad(t0, t1, b1, b0)
+
+    # Back wall (row = GRID_H-1, y = -1.5)
+    for col in range(GRID_W - 1):
+        base = (GRID_H - 1) * GRID_W
+        t0, t1 = base + col, base + col + 1
+        b0, b1 = OFF + base + col, OFF + base + col + 1
+        _quad(t0, b0, b1, t1)
+
+    # Left wall (col = 0)
+    for row in range(GRID_H - 1):
+        t0, t1 = row * GRID_W, (row + 1) * GRID_W
+        b0, b1 = OFF + row * GRID_W, OFF + (row + 1) * GRID_W
+        _quad(t0, b0, b1, t1)
+
+    # Right wall (col = GRID_W-1)
+    for row in range(GRID_H - 1):
+        t0 = row * GRID_W + (GRID_W - 1)
+        t1 = (row + 1) * GRID_W + (GRID_W - 1)
+        b0 = OFF + row * GRID_W + (GRID_W - 1)
+        b1 = OFF + (row + 1) * GRID_W + (GRID_W - 1)
+        _quad(t0, t1, b1, b0)
+
+    return {"type": "mesh", "vertices": verts, "faces": faces, "colors": colors}
 
 
 async def _process_image_to_scene(image_url: str, room_id: str = "global") -> None:
     """
-    Background async task: retry-fetch → extract → broadcast.
+    Background async task: retry-fetch → build mesh → broadcast.
 
-    Strategy:
-    - Try up to MAX_ATTEMPTS times with RETRY_DELAY_S seconds between
-      attempts.  Pollinations lazy-renders on first GET; the image is
-      typically ready within 15–30 s.
-    - On each attempt, an empty list means "not ready yet" → retry.
-    - After MAX_ATTEMPTS without a real image, broadcast the geometric
-      fallback so the WebSocket pipeline is confirmed live and the
-      viewport always shows something rather than staying blank.
-    - Any exception at any stage is swallowed; this is fire-and-forget.
+    Tries up to MAX_ATTEMPTS times with RETRY_DELAY_S seconds between
+    attempts (Pollinations lazy-renders; typically ready in 15–30 s).
+    On success, broadcasts a ``type: "mesh"`` payload with vertices, faces,
+    and packed per-vertex colors so Three.js renders a solid textured object.
+    After all retries, falls back to the rainbow-helix point cloud so the
+    WebSocket bridge is always confirmed live.  Never propagates exceptions.
     """
-    MAX_ATTEMPTS = 4
-    RETRY_DELAY_S = 12.0  # 0 s, 12 s, 24 s, 36 s
+    MAX_ATTEMPTS  = 4
+    RETRY_DELAY_S = 12.0   # attempts at 0 s, 12 s, 24 s, 36 s
 
     try:
         loop = asyncio.get_event_loop()
         t0 = time.perf_counter()
-        points: list[dict[str, Any]] = []
+        mesh: dict[str, Any] | None = None
 
         for attempt in range(MAX_ATTEMPTS):
             if attempt > 0:
                 await asyncio.sleep(RETRY_DELAY_S)
-
             try:
-                points = await loop.run_in_executor(
-                    None, _image_to_pointcloud, image_url
-                )
+                mesh = await loop.run_in_executor(None, _image_to_mesh, image_url)
             except Exception:
-                points = []
-
-            if points:
-                break  # got real image data — stop retrying
-
-        # Always broadcast: real image points, or fallback geometry
-        if not points:
-            points = _make_fallback_points()
+                mesh = None
+            if mesh is not None:
+                break
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-        scene_json = json.dumps({"type": "points", "points": points})
+
+        if mesh is not None:
+            # Solid mesh from image
+            scene_json = json.dumps(mesh)
+            face_count  = len(mesh["faces"]) // 3
+        else:
+            # Geometric fallback — confirms WebSocket is alive
+            fallback_pts = _make_fallback_points()
+            scene_json   = json.dumps({"type": "points", "points": fallback_pts})
+            face_count   = len(fallback_pts)
 
         await manager.broadcast_to_room(
             room_id,
             {
                 "type": "image_scene",
                 "sceneData": scene_json,
-                "pointCount": len(points),
+                "pointCount": face_count,
                 "executionTime": elapsed_ms,
             },
         )

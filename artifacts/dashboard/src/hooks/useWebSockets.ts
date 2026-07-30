@@ -51,10 +51,17 @@ export interface ColoredMessage extends ChatMessage {
 /** 3D scene payload forwarded to the viewport from code_result.sceneData. */
 export interface SceneDataPayload {
   type: "points" | "mesh";
-  points?: { x: number; y: number; z: number }[];
+  /** Point-cloud path: array of {x,y,z,color?} objects. */
+  points?: { x: number; y: number; z: number; color?: string }[];
+  /** Fallback single color for point clouds without per-point colors. */
   color?: string;
+  /** Mesh path: flat [x,y,z, x,y,z, …] vertex positions. */
   vertices?: number[];
+  /** Mesh path: flat [i,j,k, …] triangle face indices. */
   faces?: number[];
+  /** Mesh path: per-vertex colors packed as (r<<16|g<<8|b) integers.
+   *  Frontend unpacks into a Float32Array color BufferAttribute. */
+  colors?: number[];
 }
 
 export interface UseWebSocketOptions {

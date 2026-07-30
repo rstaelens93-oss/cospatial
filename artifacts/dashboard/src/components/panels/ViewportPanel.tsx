@@ -355,17 +355,37 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
       customObjectsRef.current.push(points);
     } else if (parsed.type === "mesh" && parsed.vertices && parsed.faces) {
       const geo = new THREE.BufferGeometry();
+
+      // Vertex positions
       geo.setAttribute(
         "position",
         new THREE.BufferAttribute(new Float32Array(parsed.vertices), 3)
       );
-      geo.setIndex(parsed.faces);
+
+      // Per-vertex colors: backend sends packed (r<<16|g<<8|b) integers
+      const hasColors = Array.isArray(parsed.colors) && parsed.colors.length > 0;
+      if (hasColors) {
+        const packed = parsed.colors!;
+        const colorBuf = new Float32Array(packed.length * 3);
+        for (let i = 0; i < packed.length; i++) {
+          colorBuf[i * 3]     = ((packed[i] >> 16) & 0xff) / 255;
+          colorBuf[i * 3 + 1] = ((packed[i] >> 8)  & 0xff) / 255;
+          colorBuf[i * 3 + 2] = ( packed[i]        & 0xff) / 255;
+        }
+        geo.setAttribute("color", new THREE.BufferAttribute(colorBuf, 3));
+      }
+
+      // Face indices — Uint32Array handles vertex counts > 65 535
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(parsed.faces), 1));
       geo.computeVertexNormals();
 
       const mat = new THREE.MeshPhongMaterial({
-        color: new THREE.Color(parsed.color ?? "#00d4ff"),
+        color: 0xffffff,
+        vertexColors: hasColors,
         wireframe: false,
         side: THREE.DoubleSide,
+        shininess: 45,
+        specular: new THREE.Color(0x333333),
       });
       const mesh = new THREE.Mesh(geo, mat);
       userGroupRef.current.add(mesh);
