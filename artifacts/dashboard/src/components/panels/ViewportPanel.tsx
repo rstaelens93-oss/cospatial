@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 interface ScenePoint {
   x: number;
@@ -25,18 +26,13 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
   const animFrameRef = useRef<number>(0);
-  const rotationGroupRef = useRef<THREE.Group | null>(null);
   const userGroupRef = useRef<THREE.Group | null>(null);
   const defaultMeshRef = useRef<THREE.Mesh | null>(null);
   const pointLightRef = useRef<THREE.PointLight | null>(null);
   const customObjectsRef = useRef<THREE.Object3D[]>([]);
   const clockRef = useRef(new THREE.Timer());
-
-  // Mouse drag state
-  const isDraggingRef = useRef(false);
-  const lastMouseRef = useRef({ x: 0, y: 0 });
-  const dragRotationRef = useRef({ x: 0, y: 0 });
 
   const initScene = useCallback(() => {
     if (!mountRef.current) return;
@@ -55,10 +51,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     camera.position.set(0, 0, 6);
     cameraRef.current = camera;
 
-    // Renderer — guard against environments where WebGL is unavailable.
-    // preserveDrawingBuffer: true ensures the canvas pixel data is retained
-    // between frames so the last rendered image stays visible even when the
-    // RAF loop yields (e.g. tab backgrounded, first frame after sceneData load).
+    // Renderer
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
@@ -82,13 +75,26 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     rendererRef.current = renderer;
     container.appendChild(renderer.domElement);
 
-    // Rotation groups
-    const rotationGroup = new THREE.Group();
-    scene.add(rotationGroup);
-    rotationGroupRef.current = rotationGroup;
+    // ── OrbitControls — replaces manual drag; handles mouse + touch ───────────
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.autoRotate = false;          // no auto-spin; user drives 100%
+    controls.enableDamping = true;        // smooth inertia on release
+    controls.dampingFactor = 0.08;
+    controls.enableZoom = true;
+    controls.enablePan = true;
+    controls.rotateSpeed = 0.8;
+    controls.zoomSpeed = 1.0;
+    controls.panSpeed = 0.6;
+    // Touch: one finger = orbit, two fingers = dolly+pan
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN,
+    };
+    controlsRef.current = controls;
 
-    const userGroup = new THREE.Group(); // for user drag rotation
-    rotationGroup.add(userGroup);
+    // Group for custom scene objects (centered in world space)
+    const userGroup = new THREE.Group();
+    scene.add(userGroup);
     userGroupRef.current = userGroup;
 
     // Lights
@@ -123,8 +129,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
       opacity: 0.85,
       transparent: true,
     });
-    const icoMeshSolid = new THREE.Mesh(icoGeoSolid, icoMatSolid);
-    userGroup.add(icoMeshSolid);
+    userGroup.add(new THREE.Mesh(icoGeoSolid, icoMatSolid));
 
     // Grid helper
     const gridHelper = new THREE.GridHelper(20, 30, 0x0d2033, 0x091420);
@@ -135,7 +140,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     const starCount = 300;
     const starPositions = new Float32Array(starCount * 3);
     for (let i = 0; i < starCount; i++) {
-      starPositions[i * 3] = (Math.random() - 0.5) * 80;
+      starPositions[i * 3]     = (Math.random() - 0.5) * 80;
       starPositions[i * 3 + 1] = (Math.random() - 0.5) * 80;
       starPositions[i * 3 + 2] = (Math.random() - 0.5) * 80;
     }
@@ -146,37 +151,33 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
       size: 0.08,
       sizeAttenuation: true,
     });
-    const stars = new THREE.Points(starGeo, starMat);
-    scene.add(stars);
+    scene.add(new THREE.Points(starGeo, starMat));
 
-    // Animation loop — wrapped in try/catch so any THREE.js throw
-    // does NOT escape to window.onerror (which triggers the Vite overlay).
+    // Animation loop
     const animate = () => {
       try {
         animFrameRef.current = requestAnimationFrame(animate);
         clockRef.current.update();
         const elapsed = clockRef.current.getElapsed();
 
-        if (rotationGroupRef.current) {
-          rotationGroupRef.current.rotation.y = elapsed * 0.15;
-        }
-
+        // Animate point light color only — no object auto-rotation
         if (pointLightRef.current) {
-          const r = (Math.sin(elapsed * 0.3) * 0.5 + 0.5) * 0.2;
           const g = (Math.sin(elapsed * 0.2 + 2) * 0.5 + 0.5) * 0.6 + 0.4;
-          const b = 1.0;
-          pointLightRef.current.color.setRGB(r * 0.2, g * 0.5, b);
+          pointLightRef.current.color.setRGB(0, g * 0.5, 1.0);
           pointLightRef.current.intensity = 3 + Math.sin(elapsed * 0.8) * 1.5;
         }
 
+        // Pulse default mesh scale when visible
         if (defaultMeshRef.current && defaultMeshRef.current.visible) {
           const s = 1 + Math.sin(elapsed * 1.2) * 0.06;
           defaultMeshRef.current.scale.setScalar(s);
         }
 
+        // OrbitControls requires update() each frame when damping is enabled
+        controls.update();
+
         renderer.render(scene, camera);
       } catch {
-        // Cancel the loop on error to prevent 60×/s window.onerror floods.
         cancelAnimationFrame(animFrameRef.current);
       }
     };
@@ -199,46 +200,15 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     };
   }, []);
 
-  // Mouse drag handlers
-  const handleMouseDown = useCallback((e: MouseEvent) => {
-    isDraggingRef.current = true;
-    lastMouseRef.current = { x: e.clientX, y: e.clientY };
-  }, []);
-
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (!isDraggingRef.current || !userGroupRef.current) return;
-    const dx = e.clientX - lastMouseRef.current.x;
-    const dy = e.clientY - lastMouseRef.current.y;
-    lastMouseRef.current = { x: e.clientX, y: e.clientY };
-
-    dragRotationRef.current.y += dx * 0.008;
-    dragRotationRef.current.x += dy * 0.008;
-
-    userGroupRef.current.rotation.y = dragRotationRef.current.y;
-    userGroupRef.current.rotation.x = dragRotationRef.current.x;
-  }, []);
-
-  const handleMouseUp = useCallback(() => {
-    isDraggingRef.current = false;
-  }, []);
-
   useEffect(() => {
     const cleanup = initScene();
-
-    const el = mountRef.current;
-    if (el) {
-      el.addEventListener("mousedown", handleMouseDown);
-      window.addEventListener("mousemove", handleMouseMove);
-      window.addEventListener("mouseup", handleMouseUp);
-    }
 
     return () => {
       cleanup?.();
       cancelAnimationFrame(animFrameRef.current);
-      if (el) {
-        el.removeEventListener("mousedown", handleMouseDown);
-        window.removeEventListener("mousemove", handleMouseMove);
-        window.removeEventListener("mouseup", handleMouseUp);
+      if (controlsRef.current) {
+        controlsRef.current.dispose();
+        controlsRef.current = null;
       }
       if (rendererRef.current) {
         rendererRef.current.dispose();
@@ -247,9 +217,10 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
             rendererRef.current.domElement
           );
         }
+        rendererRef.current = null;
       }
     };
-  }, [initScene, handleMouseDown, handleMouseMove, handleMouseUp]);
+  }, [initScene]);
 
   // Apply scene data from code execution
   useEffect(() => {
@@ -277,7 +248,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
     if (parsed.type === "points" && parsed.points) {
       const positions = new Float32Array(parsed.points.length * 3);
       parsed.points.forEach((p, i) => {
-        positions[i * 3] = p.x;
+        positions[i * 3]     = p.x;
         positions[i * 3 + 1] = p.y;
         positions[i * 3 + 2] = p.z;
       });
@@ -285,10 +256,8 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
-      const colorHex = parsed.color ?? "#00ffcc";
-      const color = new THREE.Color(colorHex);
       const mat = new THREE.PointsMaterial({
-        color: color,
+        color: new THREE.Color(parsed.color ?? "#00ffcc"),
         size: 0.08,
         sizeAttenuation: true,
       });
@@ -315,10 +284,7 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
       customObjectsRef.current.push(mesh);
     }
 
-    // Force an immediate render so the new geometry appears on the very next
-    // paint — without this the canvas stays dark until the RAF loop happens
-    // to fire, which can be up to one frame late or completely miss when the
-    // tab is backgrounded.
+    // Force an immediate render so the new geometry appears on the very next paint
     if (rendererRef.current && sceneRef.current && cameraRef.current) {
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
@@ -366,8 +332,8 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
         height: "100%",
         cursor: "grab",
         background: "#0b1118",
+        touchAction: "none",  // let OrbitControls handle all touch events
       }}
-      onMouseDown={(e) => e.preventDefault()}
     />
   );
 }
