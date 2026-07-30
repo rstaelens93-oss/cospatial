@@ -11,8 +11,11 @@ def execute_sandbox(code: str, q: multiprocessing.Queue) -> None:
     sys.stdout = StringIO()
 
     # Restrict builtins to a safe math/data subset only.
+    # Use the builtins module directly — __builtins__ is a dict (not a module)
+    # in any non-__main__ context, so getattr(__builtins__, name) would fail.
+    import builtins as _builtins_module
     safe_builtins = {
-        b: getattr(__builtins__, b)
+        b: getattr(_builtins_module, b)
         for b in [
             "abs", "all", "any", "bool", "dict", "enumerate", "float",
             "int", "len", "list", "map", "max", "min", "pow", "print",
