@@ -1,0 +1,173 @@
+name: Build CoSpatial APK
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ──────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'twa-manifest.json'
+      - 'android/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:            # manual "Run workflow" button in the Actions tab
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Optional GitHub Secrets (Settings → Secrets → Actions)
+#   KEYSTORE_BASE64      base64-encoded production keystore  (openssl base64 -in android.keystore)
+#   KEYSTORE_PASSWORD    keystore password  (defaults to "cospatial" for debug builds)
+#   KEY_PASSWORD         key password       (defaults to "cospatial" for debug builds)
+# Without these secrets the workflow generates a fresh debug keystore automatically.
+# ──────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  build-apk:
+    name: Build & sign CoSpatial.apk
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Source ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Runtimes ─────────────────────────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 3. Android SDK ───────────────────────────────────────────────────────
+      #  ubuntu-latest ships with the SDK at $ANDROID_SDK_ROOT; we just need
+      #  to accept licences and ensure the correct platform + build-tools are present.
+      - name: Accept Android SDK licences & install platform components
+        run: |
+          SDK_MANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDK_MANAGER" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "platform-tools" \
+            --channel=0
+
+      # ── 4. Bubblewrap CLI ────────────────────────────────────────────────────
+      - name: Install @bubblewrap/cli
+        run: npm install -g @bubblewrap/cli
+
+      # Point bubblewrap at the JDK and SDK that were just set up.
+      - name: Write bubblewrap config
+        run: |
+          mkdir -p ~/.bubblewrap
+          printf '{\n  "jdkPath": "%s",\n  "androidSdkPath": "%s"\n}\n' \
+            "$JAVA_HOME" \
+            "$ANDROID_SDK_ROOT" \
+            > ~/.bubblewrap/config.json
+          echo "Bubblewrap config:"
+          cat ~/.bubblewrap/config.json
+
+      # ── 5. Signing keystore ──────────────────────────────────────────────────
+      - name: Provision signing keystore
+        env:
+          KEYSTORE_BASE64:    ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD:  ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD:       ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
+          KEY_PASS="${KEY_PASSWORD:-cospatial}"
+
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "✅ Restoring production keystore from GitHub Secrets"
+            echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
+          else
+            echo "⚠️  No KEYSTORE_BASE64 secret found – generating a debug keystore"
+            keytool -genkey -v \
+              -keystore android.keystore \
+              -alias    cospatial \
+              -keyalg   RSA \
+              -keysize  2048 \
+              -validity 10000 \
+              -storepass "$KS_PASS" \
+              -keypass   "$KEY_PASS" \
+              -dname     "CN=CoSpatial, OU=Engineering, O=CoSpatial Inc, L=San Francisco, ST=CA, C=US" \
+              2>&1
+          fi
+
+          # Verify the keystore is readable
+          keytool -list -keystore android.keystore \
+            -alias cospatial \
+            -storepass "$KS_PASS" \
+            -noprompt
+
+      # ── 6. Build ─────────────────────────────────────────────────────────────
+      # bubblewrap reads twa-manifest.json from $PWD and prompts for passwords
+      # when stdin is not a TTY.  We pipe them in with printf.
+      - name: Build APK with bubblewrap
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
+          KEY_PASS="${KEY_PASSWORD:-cospatial}"
+
+          # bubblewrap may prompt: "Keystore password:" then "Key password:"
+          printf '%s\n%s\n' "$KS_PASS" "$KEY_PASS" \
+            | bubblewrap build --skipPwaValidation
+
+      # ── 7. Locate & stage the APK ────────────────────────────────────────────
+      - name: Stage CoSpatial.apk
+        run: |
+          # bubblewrap places the signed APK in android/app/build/outputs/apk/release/
+          APK=$(find android/app/build/outputs/apk/release \
+            -name "*.apk" \
+            ! -name "*unsigned*" \
+            | head -1 2>/dev/null || true)
+
+          # Fallback: search the whole tree
+          if [ -z "$APK" ]; then
+            APK=$(find . \
+              -name "*.apk" \
+              ! -name "*unsigned*" \
+              ! -path "*/node_modules/*" \
+              ! -path "*/.git/*" \
+              | head -1)
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "❌ No signed APK found. Listing build output:"
+            find android/app/build -name "*.apk" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "✅ Found APK: $APK"
+          cp "$APK" CoSpatial.apk
+          ls -lh CoSpatial.apk
+
+      # ── 8. Upload artifact ───────────────────────────────────────────────────
+      - name: Upload CoSpatial.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoSpatial
+          path: CoSpatial.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 9. Summary ───────────────────────────────────────────────────────────
+      - name: Build summary
+        run: |
+          echo "## ✅ CoSpatial APK built" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | \`com.cospatial.app\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`1.0.0\` (code 1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target URL | \`https://replit.dev/\` |" >> $GITHUB_STEP_SUMMARY
+          SIZE=$(du -h CoSpatial.apk | cut -f1)
+          echo "| APK size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download **CoSpatial** from the _Artifacts_ section of this run." \
+            >> $GITHUB_STEP_SUMMARY
