@@ -320,6 +320,11 @@ def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
         return []
 
     GRID_W, GRID_H = 96, 60
+    # Z displacement scale — controls how dramatically bright vs dark areas
+    # extrude. Must match the XY spread (4.8 × 3.0) to feel volumetric.
+    # At 4.0 the full depth range is [-2.0, +2.0], giving depth roughly
+    # equal to the grid height (3.0) for a convincing landscape effect.
+    Z_SCALE = 4.0
 
     try:
         req = urllib.request.Request(
@@ -343,7 +348,10 @@ def _image_to_pointcloud(image_url: str) -> list[dict[str, Any]]:
                 luma: float = 0.299 * r + 0.587 * g + 0.114 * b
                 x: float = round((col / (GRID_W - 1) - 0.5) * 4.8, 4)
                 y: float = round((0.5 - row / (GRID_H - 1)) * 3.0, 4)
-                z: float = round((luma / 255.0) * 2.0 - 1.0, 4)
+                # Luminance-to-depth displacement: bright pixels extrude
+                # toward the camera (+z), dark pixels recede (-z).
+                # Range: [-Z_SCALE/2, +Z_SCALE/2] = [-2.0, +2.0]
+                z: float = round((luma / 255.0) * Z_SCALE - (Z_SCALE / 2.0), 4)
                 color: str = f"#{r:02x}{g:02x}{b:02x}"
                 points.append({"x": x, "y": y, "z": z, "color": color})
 

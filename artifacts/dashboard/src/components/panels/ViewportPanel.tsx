@@ -51,7 +51,9 @@ export default function ViewportPanel({ sceneData }: ViewportPanelProps) {
 
     // Camera
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 200);
-    camera.position.set(0, 0, 6);
+    // Slight off-axis angle so luminance-depth displacement is immediately
+    // visible when a point cloud loads — pure (0,0,6) collapses z into 2-D.
+    camera.position.set(2.5, 2.0, 7);
     cameraRef.current = camera;
 
     // Renderer
