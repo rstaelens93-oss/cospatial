@@ -1,0 +1,24 @@
+{
+  "name": "CoSpatial",
+  "short_name": "CoSpatial",
+  "description": "Collaborative AI Dashboard",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d1b2a",
+  "theme_color": "#0d1b2a",
+  "icons": [
+    {
+      "src": "https://image.pollinations.ai/prompt/cospatial-app-icon-dark-navy-background-cyan-orbital-rings-orange-core-minimal-flat?width=512&height=512&nologo=true",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://image.pollinations.ai/prompt/cospatial-app-icon-dark-navy-background-cyan-orbital-rings-orange-core-minimal-flat?width=192&height=192&nologo=true",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
