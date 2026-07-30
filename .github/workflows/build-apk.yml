@@ -27,14 +27,20 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── 3. Node.js + pnpm ────────────────────────────────────────────────────
+      # ── 3. pnpm (pinned to match lockfile) + Node.js ────────────────────────
+      #  Using pnpm/action-setup ensures the exact version that generated
+      #  pnpm-lock.yaml is used; npm install -g pnpm can pull a mismatched
+      #  version that misreads pnpm-workspace.yaml settings (onlyBuiltDependencies).
+      - name: Install pnpm 10.26.1
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10.26.1'
+
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - name: Install pnpm
-        run: npm install -g pnpm
+          cache: 'pnpm'
 
       # ── 4. Android SDK ───────────────────────────────────────────────────────
       - name: Set up Android SDK
