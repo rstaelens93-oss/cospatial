@@ -311,8 +311,10 @@ async def generate_image(request: Request) -> dict:
     if not raw_prompt:
         raise HTTPException(status_code=400, detail="'prompt' is required.")
 
-    # URL-encode the prompt so spaces and special chars are path-safe.
-    encoded_prompt: str = urllib.parse.quote(raw_prompt, safe="")
+    # Normalise the prompt: lowercase, spaces → hyphens, then percent-encode
+    # any remaining special characters so the path is always valid.
+    normalised: str = raw_prompt.lower().replace(" ", "-")
+    encoded_prompt: str = urllib.parse.quote(normalised, safe="-")
 
     image_url = (
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
