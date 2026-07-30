@@ -1,28 +1,16 @@
-name: Build CoSpatial APK
+name: Build CoSpatial Native APK
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Triggers
-# ──────────────────────────────────────────────────────────────────────────────
 on:
   push:
     branches: [main, master]
     paths:
-      - 'twa-manifest.json'
-      - 'android/**'
+      - 'artifacts/dashboard/**'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Optional GitHub Secrets (Settings → Secrets → Actions)
-#   KEYSTORE_BASE64      base64-encoded production keystore
-#   KEYSTORE_PASSWORD    keystore password  (default: "cospatial")
-#   KEY_PASSWORD         key password       (default: "cospatial")
-# Without these secrets the workflow generates a debug keystore automatically.
-# ──────────────────────────────────────────────────────────────────────────────
-
 jobs:
   build-apk:
-    name: Build & sign CoSpatial.apk
+    name: Capacitor → assembleDebug → CoSpatial-Native-App
     runs-on: ubuntu-latest
 
     steps:
@@ -49,128 +37,78 @@ jobs:
 
       - name: Install Android platform & build-tools
         run: |
-          sdkmanager \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "platform-tools" \
-            --channel=0
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" --channel=0
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-      # ── 5. Bubblewrap CLI ────────────────────────────────────────────────────
-      - name: Install @bubblewrap/cli
-        run: npm install -g @bubblewrap/cli
+      # ── 5. Install web dependencies ──────────────────────────────────────────
+      - name: Install dashboard dependencies
+        working-directory: artifacts/dashboard
+        run: npm install
 
-      - name: Write bubblewrap config
-        run: |
-          mkdir -p ~/.bubblewrap
-          printf '{\n  "jdkPath": "%s",\n  "androidSdkPath": "%s"\n}\n' \
-            "$JAVA_HOME" \
-            "$ANDROID_SDK_ROOT" \
-            > ~/.bubblewrap/config.json
-          echo "=== Bubblewrap config ===" && cat ~/.bubblewrap/config.json
-          echo "=== SDK root ===" && ls "$ANDROID_SDK_ROOT"
-
-      # ── 6. Generate Android Gradle project (non-interactive) ─────────────────
-      #  --yes accepts all prompts; --skipPwaValidation skips the live-URL check.
-      #  This also writes the checksum file that prevents the "regenerate?" prompt
-      #  from firing during the build step.
-      - name: Init Android project with bubblewrap
-        run: bubblewrap init --yes --skipPwaValidation
-
-      # ── 7. Signing keystore ──────────────────────────────────────────────────
-      - name: Provision signing keystore
+      # ── 6. Build web assets ──────────────────────────────────────────────────
+      #  Vite requires PORT and BASE_PATH; for a native Capacitor build the
+      #  app runs locally so BASE_PATH must be '/' (not a sub-path).
+      - name: Build dashboard (Vite)
+        working-directory: artifacts/dashboard
         env:
-          KEYSTORE_BASE64:   ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+          PORT: '3000'
+          BASE_PATH: '/'
+          NODE_ENV: production
+        run: npm run build
+
+      # ── 7. Install Capacitor ─────────────────────────────────────────────────
+      - name: Install @capacitor/core and @capacitor/android
+        working-directory: artifacts/dashboard
+        run: npm install @capacitor/core @capacitor/android
+
+      # ── 8. Initialise Capacitor project ──────────────────────────────────────
+      #  Creates capacitor.config.json pointing at the Vite output directory.
+      - name: Init Capacitor
+        working-directory: artifacts/dashboard
         run: |
-          KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
-          KEY_PASS="${KEY_PASSWORD:-cospatial}"
+          npx cap init "CoSpatial" "com.cospatial.app" \
+            --web-dir dist/public
 
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "✅ Restoring production keystore from GitHub Secrets"
-            echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
-          else
-            echo "⚠️  No KEYSTORE_BASE64 secret – generating a debug keystore"
-            keytool -genkey -v \
-              -keystore android.keystore \
-              -alias    cospatial \
-              -keyalg   RSA \
-              -keysize  2048 \
-              -validity 10000 \
-              -storepass "$KS_PASS" \
-              -keypass   "$KEY_PASS" \
-              -dname     "CN=CoSpatial, OU=Engineering, O=CoSpatial Inc, L=San Francisco, ST=CA, C=US"
-          fi
+      # ── 9. Add Android platform ──────────────────────────────────────────────
+      - name: Add Android platform
+        working-directory: artifacts/dashboard
+        run: npx cap add android
 
-          keytool -list -keystore android.keystore \
-            -alias cospatial \
-            -storepass "$KS_PASS" \
-            -noprompt
+      # ── 10. Sync web assets into native project ───────────────────────────────
+      - name: Sync Capacitor
+        working-directory: artifacts/dashboard
+        run: npx cap sync android
 
-      # ── 8. Build APK via Gradle (fully non-interactive) ──────────────────────
-      #  bubblewrap init generates android/gradlew; we invoke Gradle directly so
-      #  no TTY / inquirer prompts can block the runner.  Signing params are
-      #  passed as -P flags — no interactive input required.
-      - name: Build release APK with Gradle
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+      # ── 11. Build debug APK with Gradle ──────────────────────────────────────
+      - name: Build debug APK
+        working-directory: artifacts/dashboard/android
         run: |
-          KS_PASS="${KEYSTORE_PASSWORD:-cospatial}"
-          KEY_PASS="${KEY_PASSWORD:-cospatial}"
-
-          chmod +x android/gradlew
-          cd android
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/android.keystore" \
-            -Pandroid.injected.signing.store.password="$KS_PASS" \
-            -Pandroid.injected.signing.key.alias=cospatial \
-            -Pandroid.injected.signing.key.password="$KEY_PASS" \
+          chmod +x gradlew
+          ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace
 
-      # ── 9. Locate & stage the APK ────────────────────────────────────────────
-      - name: Stage CoSpatial.apk
-        run: |
-          APK=$(find android/app/build/outputs/apk/release \
-            -name "*.apk" ! -name "*unsigned*" | head -1 2>/dev/null || true)
-
-          if [ -z "$APK" ]; then
-            APK=$(find . -name "*.apk" ! -name "*unsigned*" \
-              ! -path "*/node_modules/*" ! -path "*/.git/*" | head -1)
-          fi
-
-          if [ -z "$APK" ]; then
-            echo "❌ No signed APK found. Listing build output:"
-            find android/app/build -name "*.apk" 2>/dev/null || echo "(no apk output)"
-            exit 1
-          fi
-
-          echo "✅ Found APK: $APK"
-          cp "$APK" CoSpatial.apk
-          ls -lh CoSpatial.apk
-
-      # ── 10. Upload artifact ──────────────────────────────────────────────────
-      - name: Upload CoSpatial.apk
+      # ── 12. Upload artifact ──────────────────────────────────────────────────
+      - name: Upload CoSpatial-Native-App
         uses: actions/upload-artifact@v4
         with:
-          name: CoSpatial APK
-          path: CoSpatial.apk
+          name: CoSpatial-Native-App
+          path: artifacts/dashboard/android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
 
-      # ── 11. Summary ──────────────────────────────────────────────────────────
+      # ── 13. Summary ──────────────────────────────────────────────────────────
       - name: Build summary
         run: |
-          echo "## ✅ CoSpatial APK built" >> $GITHUB_STEP_SUMMARY
+          APK=artifacts/dashboard/android/app/build/outputs/apk/debug/app-debug.apk
+          SIZE=$(du -h "$APK" | cut -f1)
+          echo "## ✅ CoSpatial Native APK" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Package | \`com.cospatial.app\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | \`1.0.0\` (code 1) |" >> $GITHUB_STEP_SUMMARY
-          SIZE=$(du -h CoSpatial.apk | cut -f1)
+          echo "| Build type | \`debug\` |" >> $GITHUB_STEP_SUMMARY
           echo "| APK size | \`$SIZE\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download **CoSpatial APK** from the _Artifacts_ section of this run." \
+          echo "Download **CoSpatial-Native-App** from the _Artifacts_ section." \
             >> $GITHUB_STEP_SUMMARY
