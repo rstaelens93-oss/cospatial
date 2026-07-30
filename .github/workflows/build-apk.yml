@@ -25,11 +25,14 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── 3. Node.js ───────────────────────────────────────────────────────────
+      # ── 3. Node.js + pnpm ────────────────────────────────────────────────────
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
 
       # ── 4. Android SDK ───────────────────────────────────────────────────────
       - name: Set up Android SDK
@@ -40,46 +43,30 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" --channel=0
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-      # ── 5. Install web dependencies ──────────────────────────────────────────
-      - name: Install dashboard dependencies
-        working-directory: artifacts/dashboard
-        run: npm install
+      # ── 5. Install dependencies ──────────────────────────────────────────────
+      #  Uses pnpm (required — package.json references pnpm catalog: protocol).
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
 
       # ── 6. Build web assets ──────────────────────────────────────────────────
-      #  Vite requires PORT and BASE_PATH; for a native Capacitor build the
-      #  app runs locally so BASE_PATH must be '/' (not a sub-path).
+      #  Vite requires PORT and BASE_PATH; BASE_PATH=/ for native (no sub-path).
+      #  Output lands at artifacts/dashboard/dist/public.
       - name: Build dashboard (Vite)
         working-directory: artifacts/dashboard
         env:
           PORT: '3000'
           BASE_PATH: '/'
           NODE_ENV: production
-        run: npm run build
+        run: pnpm run build
 
-      # ── 7. Install Capacitor ─────────────────────────────────────────────────
-      - name: Install @capacitor/core and @capacitor/android
-        working-directory: artifacts/dashboard
-        run: npm install @capacitor/core @capacitor/android
-
-      # ── 8. Initialise Capacitor project ──────────────────────────────────────
-      #  Creates capacitor.config.json pointing at the Vite output directory.
-      - name: Init Capacitor
-        working-directory: artifacts/dashboard
-        run: |
-          npx cap init "CoSpatial" "com.cospatial.app" \
-            --web-dir dist/public
-
-      # ── 9. Add Android platform ──────────────────────────────────────────────
-      - name: Add Android platform
-        working-directory: artifacts/dashboard
-        run: npx cap add android
-
-      # ── 10. Sync web assets into native project ───────────────────────────────
+      # ── 7. Sync Capacitor web assets into the pre-scaffolded Android project ─
+      #  The android/ directory is committed to the repo (scaffolded locally via
+      #  `pnpm exec cap add android`), so we only need to sync updated web assets.
       - name: Sync Capacitor
         working-directory: artifacts/dashboard
-        run: npx cap sync android
+        run: pnpm exec cap sync android
 
-      # ── 11. Build debug APK with Gradle ──────────────────────────────────────
+      # ── 8. Build debug APK with Gradle ───────────────────────────────────────
       - name: Build debug APK
         working-directory: artifacts/dashboard/android
         run: |
@@ -88,7 +75,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # ── 12. Upload artifact ──────────────────────────────────────────────────
+      # ── 9. Upload artifact ───────────────────────────────────────────────────
       - name: Upload CoSpatial-Native-App
         uses: actions/upload-artifact@v4
         with:
@@ -97,7 +84,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # ── 13. Summary ──────────────────────────────────────────────────────────
+      # ── 10. Summary ──────────────────────────────────────────────────────────
       - name: Build summary
         run: |
           APK=artifacts/dashboard/android/app/build/outputs/apk/debug/app-debug.apk
