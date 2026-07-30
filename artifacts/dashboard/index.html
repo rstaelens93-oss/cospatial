@@ -1,6 +1,27 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
+    <!-- Must be the very first script — runs before Vite injects its own error overlay
+         listeners, so we can intercept non-Error unhandledrejection events and prevent
+         the overlay from blocking the UI. -->
+    <script>
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event.reason;
+        if (!(reason instanceof Error)) {
+          // Log with console.error so it appears in captured browser logs.
+          // eslint-disable-next-line no-console
+          console.error(
+            '[unhandledRejection-diagnostic] non-Error rejection intercepted:',
+            'type=' + (typeof reason),
+            'ctor=' + (reason && reason.constructor && reason.constructor.name),
+            reason
+          );
+          // Prevent Vite overlay + Vite dev-server report.
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true); // capture=true fires before bubble-phase listeners (Vite's overlay)
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
     <title>Collaborative AI Dashboard</title>
