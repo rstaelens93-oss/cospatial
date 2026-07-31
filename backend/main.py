@@ -19,6 +19,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -88,6 +89,35 @@ MONTHLY_TOKEN_CAP: int = 300
 
 # Sliding window per IP: maps ip → deque of monotonic timestamps.
 _render_windows: dict[str, deque] = defaultdict(deque)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM code-generation engine  (Groq free tier — zero cost)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+
+_LLM_SYSTEM_PROMPT = """\
+You are a Python code generator for 3D point-cloud visualizations.
+Output ONLY raw Python code — no markdown fences, no prose, no explanations.
+You may include a single comment line at the top (# title).
+
+Hard rules:
+- `math` is already imported. Do NOT write `import math` or any other import.
+- Do NOT define functions, classes, or nested scopes — top-level sequential code only.
+- Build a list named `points`; every element must be a dict:
+    {"x": float, "y": float, "z": float, "color": "#rrggbb"}
+- Target 800–2500 points for smooth real-time rendering.
+- Use custom parametric math formulas that genuinely model the 3D geometry
+  described by the user prompt (drones → rotor discs + fuselage; ships → hull
+  curve + mast; buildings → stacked floor rings; etc.).
+- Assign physically-inspired colors: gradient by height, radial layer, or
+  material zone. Avoid flat single-color fills.
+- The very last line of code must be exactly:
+    emit_scene({"type": "points", "points": points, "color": "#rrggbb"})
+  where #rrggbb is a representative accent hex color for the shape.
+Output nothing except the Python code block described above.\
+"""
 
 
 def _check_render_rate_limit(client_ip: str) -> None:
@@ -853,22 +883,99 @@ def _build_editor_script(prompt: str) -> str:
     )
 
 
+def _call_groq_sync(prompt: str) -> str | None:
+    """
+    Synchronous Groq REST call — intended to run inside asyncio.to_thread()
+    so it never blocks the event loop.
+
+    Model: llama-3.1-8b-instant (free tier, ~800 tok/s on Groq infra).
+    Returns the raw generated Python string on success, None on any failure.
+    """
+    if not _GROQ_API_KEY:
+        return None
+
+    payload = json.dumps({
+        "model": "llama-3.1-8b-instant",
+        "messages": [
+            {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+            {"role": "user",   "content": f"Generate a 3D point cloud for: {prompt}"},
+        ],
+        "max_tokens": 1200,
+        "temperature": 0.15,   # low temp → deterministic, syntactically stable code
+        "stream": False,
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {_GROQ_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "groq-python/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+
+        raw: str = data["choices"][0]["message"]["content"].strip()
+
+        # Strip markdown code fences if the model disobeys the system prompt.
+        raw = re.sub(r"^```(?:python)?\s*\n?", "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"\n?```\s*$",           "", raw, flags=re.MULTILINE)
+        raw = raw.strip()
+
+        # Safety-net: generated code must contain both sentinel tokens.
+        if "emit_scene" in raw and "points" in raw:
+            return raw
+
+        return None
+
+    except Exception as exc:
+        print(f"[groq] call failed: {exc}", flush=True)
+        return None
+
+
 async def _generate_editor_script(prompt: str, room_id: str) -> None:
     """
     Pre-Fill hook — called concurrently after the image_scene broadcast.
-    Builds a keyword-matched Python point-cloud script locally (no network
-    call) and broadcasts it as an ``update_editor_text`` frame so the frontend
-    can pre-fill the Python Engine editor.  Non-fatal.
+
+    Pipeline:
+      1. Try Groq LLM (llama-3.1-8b-instant, free tier) for a fully dynamic,
+         prompt-aware point-cloud script with custom math formulas.
+      2. Fall back to the local keyword-dictionary (_build_editor_script) if
+         GROQ_API_KEY is absent, the API is unreachable, or the response fails
+         the emit_scene / points safety check.
+
+    Broadcasts the result as an ``update_editor_text`` WebSocket frame.
+    Non-fatal — exceptions are swallowed so this never disrupts the event loop.
     """
     try:
-        script = _build_editor_script(prompt)
+        script: str | None = None
+
+        # ── 1. LLM path (async-safe: runs sync I/O in a thread) ────────────
+        if _GROQ_API_KEY:
+            script = await asyncio.to_thread(_call_groq_sync, prompt)
+            if script:
+                print(f"[groq] script generated ({len(script)} chars) for: {prompt[:60]!r}",
+                      flush=True)
+
+        # ── 2. Fallback: instant local keyword dictionary ───────────────────
+        if not script:
+            script = _build_editor_script(prompt)
+            print(f"[groq] using keyword fallback for: {prompt[:60]!r}", flush=True)
+
         if script:
             await manager.broadcast_to_room(room_id, {
                 "type": "update_editor_text",
                 "code": script,
             })
-    except Exception:
-        pass  # best-effort; never crash the event loop
+
+    except Exception as exc:
+        print(f"[groq] _generate_editor_script error: {exc}", flush=True)
+        # best-effort — never crash the event loop
 
 
 async def _process_image_to_scene(image_url: str, prompt: str = "", room_id: str = "global") -> None:
