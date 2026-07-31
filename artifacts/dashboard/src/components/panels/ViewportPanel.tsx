@@ -301,6 +301,9 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
       const colorsBuf = new Float32Array(count * 3);
       let hasVertexColors = false;
 
+      // Bucket points by color key so we can draw one wireframe line per group.
+      const colorGroups = new Map<string, ScenePoint[]>();
+
       parsed.points.forEach((p, i) => {
         positions[i * 3]     = p.x;
         positions[i * 3 + 1] = p.y;
@@ -312,8 +315,13 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
           colorsBuf[i * 3 + 2] = c.b;
           hasVertexColors = true;
         }
+
+        const key = p.color ?? "__default__";
+        if (!colorGroups.has(key)) colorGroups.set(key, []);
+        colorGroups.get(key)!.push(p);
       });
 
+      // ── Point cloud ────────────────────────────────────────────────────
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
       if (hasVertexColors) {
@@ -325,13 +333,45 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
         // the top-level palette color for single-color Python-generated clouds.
         color: hasVertexColors ? 0xffffff : new THREE.Color(parsed.color ?? "#00ffcc"),
         vertexColors: hasVertexColors,
-        size: hasVertexColors ? 0.08 : 0.08,
+        size: 0.08,
         sizeAttenuation: true,
       });
 
-      const points = new THREE.Points(geo, mat);
-      userGroupRef.current.add(points);
-      customObjectsRef.current.push(points);
+      const pointsMesh = new THREE.Points(geo, mat);
+      userGroupRef.current.add(pointsMesh);
+      customObjectsRef.current.push(pointsMesh);
+
+      // ── Translucent wireframe lines — one polyline per color group ─────
+      // Each group shares the same discrete Z layer (topographic slice), so
+      // the polyline traces a clean contour ring in the depth direction.
+      colorGroups.forEach((groupPoints, colorKey) => {
+        if (groupPoints.length < 2) return;
+
+        const linePosArr = new Float32Array(groupPoints.length * 3);
+        groupPoints.forEach((p, i) => {
+          linePosArr[i * 3]     = p.x;
+          linePosArr[i * 3 + 1] = p.y;
+          linePosArr[i * 3 + 2] = p.z;
+        });
+
+        const lineGeo = new THREE.BufferGeometry();
+        lineGeo.setAttribute("position", new THREE.BufferAttribute(linePosArr, 3));
+
+        const groupColor =
+          colorKey === "__default__"
+            ? new THREE.Color(parsed.color ?? "#00ffcc")
+            : new THREE.Color(colorKey);
+
+        const lineMat = new THREE.LineBasicMaterial({
+          color: groupColor,
+          transparent: true,
+          opacity: 0.35,
+        });
+
+        const line = new THREE.Line(lineGeo, lineMat);
+        userGroupRef.current!.add(line);
+        customObjectsRef.current.push(line);
+      });
     } else if (parsed.type === "mesh" && parsed.vertices && parsed.faces) {
       const geo = new THREE.BufferGeometry();
 
