@@ -589,183 +589,257 @@ def _image_to_volumetric_points(image_url: str) -> list[dict[str, Any]] | None:
 
 def _build_editor_script(prompt: str) -> str:
     """
-    Deterministic local template — zero network calls, instant.
+    Strict dictionary keyword → script mapper.
 
-    Matches keywords in the prompt to a family of parametric point-cloud
-    shapes and returns a complete, runnable Python emit_scene() script.
-    Each script uses only the stdlib ``math`` module so it always executes
-    cleanly inside the sandbox.
+    Extracts whole words from the prompt (punctuation stripped), then checks
+    each entry in KEYWORD_MAP in order.  First entry whose keyword set has a
+    non-empty intersection with the prompt words wins.
+
+    Using whole-word set intersection (``words & keys``) instead of substring
+    search (``k in prompt``) prevents false positives such as "block" matching
+    "blockchain" or "cube" matching "cubic" in unrelated concepts.
     """
-    p = prompt.lower()
+    # ── Whole-word extraction — strips punctuation so "station." → "station" ─
+    words: set[str] = set(
+        "".join(c if c.isalnum() or c == " " else " " for c in prompt.lower()).split()
+    )
 
-    # ── Sphere / ball / planet ──────────────────────────────────────────────
-    if any(k in p for k in ("sphere", "ball", "planet", "earth", "moon", "globe", "orb")):
-        return (
-            "# Point cloud: sphere  (Fibonacci lattice — even surface coverage)\n"
-            "import math\n"
-            "points = []\n"
-            "N = 2000\n"
-            "phi_gold = (1 + math.sqrt(5)) / 2\n"
-            "for i in range(N):\n"
-            "    y = 1 - (i / (N - 1)) * 2\n"
-            "    r = math.sqrt(max(0.0, 1 - y * y))\n"
-            "    theta = 2 * math.pi * i / phi_gold\n"
-            "    x = math.cos(theta) * r\n"
-            "    z = math.sin(theta) * r\n"
-            "    h = i / N\n"
-            '    color = "#{:02x}{:02x}{:02x}".format(\n'
-            "        int(0x22 + h * 0xcc), int(0xaa + h * 0x44), int(0xff - h * 0x66))\n"
-            '    points.append({"x": round(x * 2, 3), "y": round(y * 2, 3), "z": round(z * 2, 3), "color": color})\n'
-            'emit_scene({"type": "points", "points": points, "color": "#00ffcc"})\n'
-        )
+    # ── Script bodies ────────────────────────────────────────────────────────
 
-    # ── Cube / box / building ────────────────────────────────────────────────
-    if any(k in p for k in ("cube", "box", "building", "block", "architecture", "city", "castle")):
-        return (
-            "# Point cloud: cube faces\n"
-            "import math\n"
-            "points = []\n"
-            "SIDE = 14\n"
-            "for face in range(6):\n"
-            "    for i in range(SIDE):\n"
-            "        for j in range(SIDE):\n"
-            "            u = (i / (SIDE - 1)) * 2 - 1\n"
-            "            v = (j / (SIDE - 1)) * 2 - 1\n"
-            "            coords = [(u,v,1),(u,v,-1),(1,u,v),(-1,u,v),(u,1,v),(u,-1,v)]\n"
-            "            x, y, z = coords[face]\n"
-            "            h = face / 5\n"
-            '            color = "#{:02x}{:02x}{:02x}".format(\n'
-            "                int(0x44 + h * 0xaa), int(0x88 + h * 0x44), int(0xcc - h * 0x44))\n"
-            '            points.append({"x": round(x*2,3), "y": round(y*2,3), "z": round(z*2,3), "color": color})\n'
-            'emit_scene({"type": "points", "points": points, "color": "#4488ff"})\n'
-        )
+    RING = (
+        "# Point cloud: flat circular ring\n"
+        "import math\n"
+        "points = []\n"
+        "for i in range(360):\n"
+        "    theta = math.radians(i)\n"
+        "    for radius in [1.2, 1.5, 1.8, 2.1]:\n"
+        "        x = math.cos(theta) * radius\n"
+        "        z = math.sin(theta) * radius\n"
+        "        h = i / 360\n"
+        '        color = "#{:02x}{:02x}{:02x}".format(\n'
+        "            int(h * 0xff), int(0x88 + h * 0x44), int(0xff - h * 0x88))\n"
+        '        points.append({"x": round(x, 3), "y": 0.0, "z": round(z, 3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#ffaa00"})\n'
+    )
 
-    # ── Torus / ring / donut ─────────────────────────────────────────────────
-    if any(k in p for k in ("torus", "donut", "doughnut", "ring", "hoop")):
-        return (
-            "# Point cloud: torus\n"
-            "import math\n"
-            "points = []\n"
-            "R, r = 1.5, 0.55\n"
-            "for i in range(80):\n"
-            "    theta = 2 * math.pi * i / 80\n"
-            "    for j in range(40):\n"
-            "        phi = 2 * math.pi * j / 40\n"
-            "        x = (R + r * math.cos(phi)) * math.cos(theta)\n"
-            "        y = r * math.sin(phi)\n"
-            "        z = (R + r * math.cos(phi)) * math.sin(theta)\n"
-            "        h = i / 80\n"
-            '        color = "#{:02x}{:02x}{:02x}".format(\n'
-            "            int(0xff * h), int(0x44 + 0xaa * h), int(0xff * (1 - h)))\n"
-            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
-            'emit_scene({"type": "points", "points": points, "color": "#ff44ff"})\n'
-        )
+    CUBE = (
+        "# Point cloud: cube (6 faces)\n"
+        "import math\n"
+        "points = []\n"
+        "SIDE = 14\n"
+        "for face in range(6):\n"
+        "    for i in range(SIDE):\n"
+        "        for j in range(SIDE):\n"
+        "            u = (i / (SIDE - 1)) * 2 - 1\n"
+        "            v = (j / (SIDE - 1)) * 2 - 1\n"
+        "            coords = [(u,v,1),(u,v,-1),(1,u,v),(-1,u,v),(u,1,v),(u,-1,v)]\n"
+        "            x, y, z = coords[face]\n"
+        "            h = face / 5\n"
+        '            color = "#{:02x}{:02x}{:02x}".format(\n'
+        "                int(0x44 + h * 0xaa), int(0x88 + h * 0x44), int(0xcc - h * 0x44))\n"
+        '            points.append({"x": round(x*2,3), "y": round(y*2,3), "z": round(z*2,3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#4488ff"})\n'
+    )
 
-    # ── Spiral / helix / galaxy ──────────────────────────────────────────────
-    if any(k in p for k in ("spiral", "helix", "galaxy", "tornado", "vortex", "swirl", "coil")):
-        return (
-            "# Point cloud: double helix spiral\n"
-            "import math\n"
-            "points = []\n"
-            "for strand in range(2):\n"
-            "    offset = math.pi * strand\n"
-            "    for i in range(900):\n"
-            "        t = i / 900 * 6 * math.pi\n"
-            "        radius = 0.4 + t * 0.06\n"
-            "        x = math.cos(t + offset) * radius\n"
-            "        z = math.sin(t + offset) * radius\n"
-            "        y = t * 0.13 - 2.5\n"
-            "        h = i / 900\n"
-            "        r_c = int(0x22 + h * 0xdd) if strand == 0 else int(0xff - h * 0xdd)\n"
-            '        color = "#{:02x}{:02x}{:02x}".format(r_c, int(0xff - h * 0xaa), int(0x88 + h * 0x77))\n'
-            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
-            'emit_scene({"type": "points", "points": points, "color": "#00ffcc"})\n'
-        )
+    STATION = (
+        "# Point cloud: space station (hub + 4 arms + outer ring)\n"
+        "import math\n"
+        "points = []\n"
+        "# Central hub — Fibonacci sphere\n"
+        "N = 400\n"
+        "phi_gold = (1 + math.sqrt(5)) / 2\n"
+        "for i in range(N):\n"
+        "    y = 1 - (i / (N - 1)) * 2\n"
+        "    r = math.sqrt(max(0.0, 1 - y * y))\n"
+        "    theta = 2 * math.pi * i / phi_gold\n"
+        "    points.append({\"x\": round(math.cos(theta)*r*0.5, 3),\n"
+        "                   \"y\": round(y * 0.5, 3),\n"
+        "                   \"z\": round(math.sin(theta)*r*0.5, 3),\n"
+        "                   \"color\": \"#44aacc\"})\n"
+        "# Radial arms\n"
+        "for arm in range(4):\n"
+        "    angle = math.pi / 2 * arm\n"
+        "    for i in range(60):\n"
+        "        t = i / 59\n"
+        "        x = math.cos(angle) * t * 2.0\n"
+        "        z = math.sin(angle) * t * 2.0\n"
+        "        c = int(0x44 + t * 0xaa)\n"
+        "        points.append({\"x\": round(x, 3), \"y\": round((i % 3) * 0.05 - 0.05, 3),\n"
+        "                       \"z\": round(z, 3), \"color\": \"#{:02x}aa{:02x}\".format(c, c)})\n"
+        "# Outer ring\n"
+        "for i in range(300):\n"
+        "    theta = 2 * math.pi * i / 300\n"
+        "    x = math.cos(theta) * 2.2\n"
+        "    z = math.sin(theta) * 2.2\n"
+        "    wave = round(math.sin(theta * 8) * 0.08, 3)\n"
+        "    points.append({\"x\": round(x, 3), \"y\": wave, \"z\": round(z, 3), \"color\": \"#00d4ff\"})\n"
+        'emit_scene({"type": "points", "points": points, "color": "#44aacc"})\n'
+    )
 
-    # ── Pyramid / cone / mountain ────────────────────────────────────────────
-    if any(k in p for k in ("pyramid", "cone", "mountain", "volcano", "peak", "triangle")):
-        return (
-            "# Point cloud: layered cone / pyramid\n"
-            "import math\n"
-            "points = []\n"
-            "LAYERS = 14\n"
-            "for layer in range(LAYERS):\n"
-            "    y = layer / LAYERS * 4 - 2\n"
-            "    radius = (1 - layer / LAYERS) * 2.2\n"
-            "    n = max(4, int(48 * (1 - layer / LAYERS)))\n"
-            "    for i in range(n):\n"
-            "        a = 2 * math.pi * i / n\n"
-            "        x = math.cos(a) * radius\n"
-            "        z = math.sin(a) * radius\n"
-            "        h = layer / LAYERS\n"
-            '        color = "#{:02x}{:02x}{:02x}".format(\n'
-            "            int(0xff * (1 - h)), int(0x44 + 0x88 * h), int(0x22 + 0x88 * h))\n"
-            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
-            'emit_scene({"type": "points", "points": points, "color": "#ffaa00"})\n'
-        )
+    SPHERE = (
+        "# Point cloud: sphere (Fibonacci lattice)\n"
+        "import math\n"
+        "points = []\n"
+        "N = 2000\n"
+        "phi_gold = (1 + math.sqrt(5)) / 2\n"
+        "for i in range(N):\n"
+        "    y = 1 - (i / (N - 1)) * 2\n"
+        "    r = math.sqrt(max(0.0, 1 - y * y))\n"
+        "    theta = 2 * math.pi * i / phi_gold\n"
+        "    x = math.cos(theta) * r\n"
+        "    z = math.sin(theta) * r\n"
+        "    h = i / N\n"
+        '    color = "#{:02x}{:02x}{:02x}".format(\n'
+        "        int(0x22 + h * 0xcc), int(0xaa + h * 0x44), int(0xff - h * 0x66))\n"
+        '    points.append({"x": round(x * 2, 3), "y": round(y * 2, 3), "z": round(z * 2, 3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#00ffcc"})\n'
+    )
 
-    # ── Cylinder / tower / pillar ────────────────────────────────────────────
-    if any(k in p for k in ("cylinder", "tower", "pillar", "column", "tube", "pipe", "barrel")):
-        return (
-            "# Point cloud: cylinder with caps\n"
-            "import math\n"
-            "points = []\n"
-            "RINGS, PER_RING = 20, 60\n"
-            "for ring in range(RINGS):\n"
-            "    y = ring / (RINGS - 1) * 4 - 2\n"
-            "    for i in range(PER_RING):\n"
-            "        a = 2 * math.pi * i / PER_RING\n"
-            "        x = math.cos(a) * 1.6\n"
-            "        z = math.sin(a) * 1.6\n"
-            "        h = ring / RINGS\n"
-            '        color = "#{:02x}{:02x}{:02x}".format(\n'
-            "            int(0x22 + h * 0xcc), int(0x88 + h * 0x44), int(0xff - h * 0x88))\n"
-            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
-            "for i in range(240):\n"
-            "    a = 2 * math.pi * i / 240\n"
-            "    r = (i % 20) / 20 * 1.6\n"
-            "    for cy in [-2.0, 2.0]:\n"
-            '        points.append({"x": round(math.cos(a)*r,3), "y": cy, "z": round(math.sin(a)*r,3), "color": "#44aaff"})\n'
-            'emit_scene({"type": "points", "points": points, "color": "#44aaff"})\n'
-        )
+    TORUS = (
+        "# Point cloud: torus\n"
+        "import math\n"
+        "points = []\n"
+        "R, r = 1.5, 0.55\n"
+        "for i in range(80):\n"
+        "    theta = 2 * math.pi * i / 80\n"
+        "    for j in range(40):\n"
+        "        phi = 2 * math.pi * j / 40\n"
+        "        x = (R + r * math.cos(phi)) * math.cos(theta)\n"
+        "        y = r * math.sin(phi)\n"
+        "        z = (R + r * math.cos(phi)) * math.sin(theta)\n"
+        "        h = i / 80\n"
+        '        color = "#{:02x}{:02x}{:02x}".format(\n'
+        "            int(0xff * h), int(0x44 + 0xaa * h), int(0xff * (1 - h)))\n"
+        '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#ff44ff"})\n'
+    )
 
-    # ── Tree / plant / nature ────────────────────────────────────────────────
-    if any(k in p for k in ("tree", "plant", "flower", "forest", "branch", "leaf", "fern", "nature")):
-        return (
-            "# Point cloud: recursive branching tree\n"
-            "import math\n"
-            "points = []\n"
-            "\n"
-            "def add_branch(x, y, z, axz, tilt, length, depth):\n"
-            "    if depth == 0 or length < 0.08:\n"
-            "        return\n"
-            "    steps = max(1, int(length * 16))\n"
-            "    for i in range(steps):\n"
-            "        t = i / steps\n"
-            "        bx = x + math.sin(axz) * math.sin(tilt) * t * length\n"
-            "        by = y + math.cos(tilt) * t * length\n"
-            "        bz = z + math.cos(axz) * math.sin(tilt) * t * length\n"
-            "        g = int(0x55 + depth * 0x1a)\n"
-            '        points.append({"x": round(bx,3), "y": round(by,3), "z": round(bz,3), "color": "#1a{:02x}1a".format(g)})\n'
-            "    nx = x + math.sin(axz) * math.sin(tilt) * length\n"
-            "    ny = y + math.cos(tilt) * length\n"
-            "    nz = z + math.cos(axz) * math.sin(tilt) * length\n"
-            "    for da, dt in [(-0.55, 0.28), (0.55, 0.28), (0.0, 0.08)]:\n"
-            "        add_branch(nx, ny, nz, axz + da, tilt + dt, length * 0.63, depth - 1)\n"
-            "\n"
-            "add_branch(0, -2.2, 0, 0, 0.08, 1.6, 5)\n"
-            'emit_scene({"type": "points", "points": points[:2500], "color": "#22aa22"})\n'
-        )
+    SPIRAL = (
+        "# Point cloud: double helix spiral\n"
+        "import math\n"
+        "points = []\n"
+        "for strand in range(2):\n"
+        "    offset = math.pi * strand\n"
+        "    for i in range(900):\n"
+        "        t = i / 900 * 6 * math.pi\n"
+        "        radius = 0.4 + t * 0.06\n"
+        "        x = math.cos(t + offset) * radius\n"
+        "        z = math.sin(t + offset) * radius\n"
+        "        y = t * 0.13 - 2.5\n"
+        "        h = i / 900\n"
+        "        r_c = int(0x22 + h * 0xdd) if strand == 0 else int(0xff - h * 0xdd)\n"
+        '        color = "#{:02x}{:02x}{:02x}".format(r_c, int(0xff - h * 0xaa), int(0x88 + h * 0x77))\n'
+        '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#00ffcc"})\n'
+    )
 
-    # ── Default: (2,3) torus knot — elegant, works for any unmatched subject ──
-    safe = prompt.replace("'", "").replace('"', "")[:60]
+    PYRAMID = (
+        "# Point cloud: layered cone / pyramid\n"
+        "import math\n"
+        "points = []\n"
+        "LAYERS = 14\n"
+        "for layer in range(LAYERS):\n"
+        "    y = layer / LAYERS * 4 - 2\n"
+        "    radius = (1 - layer / LAYERS) * 2.2\n"
+        "    n = max(4, int(48 * (1 - layer / LAYERS)))\n"
+        "    for i in range(n):\n"
+        "        a = 2 * math.pi * i / n\n"
+        "        x = math.cos(a) * radius\n"
+        "        z = math.sin(a) * radius\n"
+        "        h = layer / LAYERS\n"
+        '        color = "#{:02x}{:02x}{:02x}".format(\n'
+        "            int(0xff * (1 - h)), int(0x44 + 0x88 * h), int(0x22 + 0x88 * h))\n"
+        '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#ffaa00"})\n'
+    )
+
+    CYLINDER = (
+        "# Point cloud: cylinder with caps\n"
+        "import math\n"
+        "points = []\n"
+        "RINGS, PER_RING = 20, 60\n"
+        "for ring in range(RINGS):\n"
+        "    y = ring / (RINGS - 1) * 4 - 2\n"
+        "    for i in range(PER_RING):\n"
+        "        a = 2 * math.pi * i / PER_RING\n"
+        "        x = math.cos(a) * 1.6\n"
+        "        z = math.sin(a) * 1.6\n"
+        "        h = ring / RINGS\n"
+        '        color = "#{:02x}{:02x}{:02x}".format(\n'
+        "            int(0x22 + h * 0xcc), int(0x88 + h * 0x44), int(0xff - h * 0x88))\n"
+        '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+        "for i in range(240):\n"
+        "    a = 2 * math.pi * i / 240\n"
+        "    r = (i % 20) / 20 * 1.6\n"
+        "    for cy in [-2.0, 2.0]:\n"
+        '        points.append({"x": round(math.cos(a)*r,3), "y": cy, "z": round(math.sin(a)*r,3), "color": "#44aaff"})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#44aaff"})\n'
+    )
+
+    TREE = (
+        "# Point cloud: recursive branching tree\n"
+        "import math\n"
+        "points = []\n"
+        "\n"
+        "def add_branch(x, y, z, axz, tilt, length, depth):\n"
+        "    if depth == 0 or length < 0.08:\n"
+        "        return\n"
+        "    steps = max(1, int(length * 16))\n"
+        "    for i in range(steps):\n"
+        "        t = i / steps\n"
+        "        bx = x + math.sin(axz) * math.sin(tilt) * t * length\n"
+        "        by = y + math.cos(tilt) * t * length\n"
+        "        bz = z + math.cos(axz) * math.sin(tilt) * t * length\n"
+        "        g = int(0x55 + depth * 0x1a)\n"
+        '        points.append({"x": round(bx,3), "y": round(by,3), "z": round(bz,3), "color": "#1a{:02x}1a".format(g)})\n'
+        "    nx = x + math.sin(axz) * math.sin(tilt) * length\n"
+        "    ny = y + math.cos(tilt) * length\n"
+        "    nz = z + math.cos(axz) * math.sin(tilt) * length\n"
+        "    for da, dt in [(-0.55, 0.28), (0.55, 0.28), (0.0, 0.08)]:\n"
+        "        add_branch(nx, ny, nz, axz + da, tilt + dt, length * 0.63, depth - 1)\n"
+        "\n"
+        "add_branch(0, -2.2, 0, 0, 0.08, 1.6, 5)\n"
+        'emit_scene({"type": "points", "points": points[:2500], "color": "#22aa22"})\n'
+    )
+
+    # ── Strict keyword → script mapping (checked in order; first match wins) ─
+    # Each entry: (frozenset of exact trigger words, script string).
+    # Words are matched as whole tokens — "ring" will NOT match "earring" or
+    # "ringmaster" because we split on word boundaries before comparing.
+    KEYWORD_MAP: list[tuple[frozenset[str], str]] = [
+        # Most-specific shapes first to prevent partial overlap with defaults.
+        (frozenset({"station", "outpost", "habitat", "orbital"}),      STATION),
+        (frozenset({"ring", "hoop", "circle", "loop"}),                RING),
+        (frozenset({"torus", "donut", "doughnut"}),                    TORUS),
+        (frozenset({"cube", "box"}),                                   CUBE),
+        (frozenset({"sphere", "ball", "planet", "earth", "moon",
+                    "globe", "orb"}),                                  SPHERE),
+        (frozenset({"spiral", "helix", "galaxy", "tornado",
+                    "vortex", "swirl", "coil"}),                       SPIRAL),
+        (frozenset({"pyramid", "cone", "mountain", "volcano",
+                    "peak"}),                                          PYRAMID),
+        (frozenset({"cylinder", "tower", "pillar", "column",
+                    "tube", "pipe", "barrel"}),                        CYLINDER),
+        (frozenset({"tree", "plant", "flower", "forest",
+                    "branch", "leaf", "fern", "nature"}),              TREE),
+        # Broader architectural terms last — only reached if none of the
+        # more specific shape words appear in the prompt.
+        (frozenset({"building", "architecture", "city", "castle",
+                    "block", "structure"}),                            CUBE),
+    ]
+
+    for trigger_words, script in KEYWORD_MAP:
+        if words & trigger_words:          # non-empty intersection → match
+            return script
+
+    # ── Default: (2,3) torus knot — visually interesting for any subject ─────
+    safe = "".join(c if c.isalnum() or c in " -" else "" for c in prompt)[:60].strip()
     return (
         f"# Auto-generated point cloud for: {safe}\n"
         "import math\n"
         "points = []\n"
         "for i in range(2000):\n"
         "    t = i / 2000 * 2 * math.pi\n"
-        "    # (2,3) torus knot\n"
         "    theta, phi = t * 2, t * 3\n"
         "    R, r = 1.6, 0.6\n"
         "    x = (R + r * math.cos(phi)) * math.cos(theta)\n"
