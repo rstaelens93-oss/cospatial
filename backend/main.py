@@ -587,51 +587,214 @@ def _image_to_volumetric_points(image_url: str) -> list[dict[str, Any]] | None:
     return points
 
 
+def _build_editor_script(prompt: str) -> str:
+    """
+    Deterministic local template — zero network calls, instant.
+
+    Matches keywords in the prompt to a family of parametric point-cloud
+    shapes and returns a complete, runnable Python emit_scene() script.
+    Each script uses only the stdlib ``math`` module so it always executes
+    cleanly inside the sandbox.
+    """
+    p = prompt.lower()
+
+    # ── Sphere / ball / planet ──────────────────────────────────────────────
+    if any(k in p for k in ("sphere", "ball", "planet", "earth", "moon", "globe", "orb")):
+        return (
+            "# Point cloud: sphere  (Fibonacci lattice — even surface coverage)\n"
+            "import math\n"
+            "points = []\n"
+            "N = 2000\n"
+            "phi_gold = (1 + math.sqrt(5)) / 2\n"
+            "for i in range(N):\n"
+            "    y = 1 - (i / (N - 1)) * 2\n"
+            "    r = math.sqrt(max(0.0, 1 - y * y))\n"
+            "    theta = 2 * math.pi * i / phi_gold\n"
+            "    x = math.cos(theta) * r\n"
+            "    z = math.sin(theta) * r\n"
+            "    h = i / N\n"
+            '    color = "#{:02x}{:02x}{:02x}".format(\n'
+            "        int(0x22 + h * 0xcc), int(0xaa + h * 0x44), int(0xff - h * 0x66))\n"
+            '    points.append({"x": round(x * 2, 3), "y": round(y * 2, 3), "z": round(z * 2, 3), "color": color})\n'
+            'emit_scene({"type": "points", "points": points, "color": "#00ffcc"})\n'
+        )
+
+    # ── Cube / box / building ────────────────────────────────────────────────
+    if any(k in p for k in ("cube", "box", "building", "block", "architecture", "city", "castle")):
+        return (
+            "# Point cloud: cube faces\n"
+            "import math\n"
+            "points = []\n"
+            "SIDE = 14\n"
+            "for face in range(6):\n"
+            "    for i in range(SIDE):\n"
+            "        for j in range(SIDE):\n"
+            "            u = (i / (SIDE - 1)) * 2 - 1\n"
+            "            v = (j / (SIDE - 1)) * 2 - 1\n"
+            "            coords = [(u,v,1),(u,v,-1),(1,u,v),(-1,u,v),(u,1,v),(u,-1,v)]\n"
+            "            x, y, z = coords[face]\n"
+            "            h = face / 5\n"
+            '            color = "#{:02x}{:02x}{:02x}".format(\n'
+            "                int(0x44 + h * 0xaa), int(0x88 + h * 0x44), int(0xcc - h * 0x44))\n"
+            '            points.append({"x": round(x*2,3), "y": round(y*2,3), "z": round(z*2,3), "color": color})\n'
+            'emit_scene({"type": "points", "points": points, "color": "#4488ff"})\n'
+        )
+
+    # ── Torus / ring / donut ─────────────────────────────────────────────────
+    if any(k in p for k in ("torus", "donut", "doughnut", "ring", "hoop")):
+        return (
+            "# Point cloud: torus\n"
+            "import math\n"
+            "points = []\n"
+            "R, r = 1.5, 0.55\n"
+            "for i in range(80):\n"
+            "    theta = 2 * math.pi * i / 80\n"
+            "    for j in range(40):\n"
+            "        phi = 2 * math.pi * j / 40\n"
+            "        x = (R + r * math.cos(phi)) * math.cos(theta)\n"
+            "        y = r * math.sin(phi)\n"
+            "        z = (R + r * math.cos(phi)) * math.sin(theta)\n"
+            "        h = i / 80\n"
+            '        color = "#{:02x}{:02x}{:02x}".format(\n'
+            "            int(0xff * h), int(0x44 + 0xaa * h), int(0xff * (1 - h)))\n"
+            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+            'emit_scene({"type": "points", "points": points, "color": "#ff44ff"})\n'
+        )
+
+    # ── Spiral / helix / galaxy ──────────────────────────────────────────────
+    if any(k in p for k in ("spiral", "helix", "galaxy", "tornado", "vortex", "swirl", "coil")):
+        return (
+            "# Point cloud: double helix spiral\n"
+            "import math\n"
+            "points = []\n"
+            "for strand in range(2):\n"
+            "    offset = math.pi * strand\n"
+            "    for i in range(900):\n"
+            "        t = i / 900 * 6 * math.pi\n"
+            "        radius = 0.4 + t * 0.06\n"
+            "        x = math.cos(t + offset) * radius\n"
+            "        z = math.sin(t + offset) * radius\n"
+            "        y = t * 0.13 - 2.5\n"
+            "        h = i / 900\n"
+            "        r_c = int(0x22 + h * 0xdd) if strand == 0 else int(0xff - h * 0xdd)\n"
+            '        color = "#{:02x}{:02x}{:02x}".format(r_c, int(0xff - h * 0xaa), int(0x88 + h * 0x77))\n'
+            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+            'emit_scene({"type": "points", "points": points, "color": "#00ffcc"})\n'
+        )
+
+    # ── Pyramid / cone / mountain ────────────────────────────────────────────
+    if any(k in p for k in ("pyramid", "cone", "mountain", "volcano", "peak", "triangle")):
+        return (
+            "# Point cloud: layered cone / pyramid\n"
+            "import math\n"
+            "points = []\n"
+            "LAYERS = 14\n"
+            "for layer in range(LAYERS):\n"
+            "    y = layer / LAYERS * 4 - 2\n"
+            "    radius = (1 - layer / LAYERS) * 2.2\n"
+            "    n = max(4, int(48 * (1 - layer / LAYERS)))\n"
+            "    for i in range(n):\n"
+            "        a = 2 * math.pi * i / n\n"
+            "        x = math.cos(a) * radius\n"
+            "        z = math.sin(a) * radius\n"
+            "        h = layer / LAYERS\n"
+            '        color = "#{:02x}{:02x}{:02x}".format(\n'
+            "            int(0xff * (1 - h)), int(0x44 + 0x88 * h), int(0x22 + 0x88 * h))\n"
+            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+            'emit_scene({"type": "points", "points": points, "color": "#ffaa00"})\n'
+        )
+
+    # ── Cylinder / tower / pillar ────────────────────────────────────────────
+    if any(k in p for k in ("cylinder", "tower", "pillar", "column", "tube", "pipe", "barrel")):
+        return (
+            "# Point cloud: cylinder with caps\n"
+            "import math\n"
+            "points = []\n"
+            "RINGS, PER_RING = 20, 60\n"
+            "for ring in range(RINGS):\n"
+            "    y = ring / (RINGS - 1) * 4 - 2\n"
+            "    for i in range(PER_RING):\n"
+            "        a = 2 * math.pi * i / PER_RING\n"
+            "        x = math.cos(a) * 1.6\n"
+            "        z = math.sin(a) * 1.6\n"
+            "        h = ring / RINGS\n"
+            '        color = "#{:02x}{:02x}{:02x}".format(\n'
+            "            int(0x22 + h * 0xcc), int(0x88 + h * 0x44), int(0xff - h * 0x88))\n"
+            '        points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+            "for i in range(240):\n"
+            "    a = 2 * math.pi * i / 240\n"
+            "    r = (i % 20) / 20 * 1.6\n"
+            "    for cy in [-2.0, 2.0]:\n"
+            '        points.append({"x": round(math.cos(a)*r,3), "y": cy, "z": round(math.sin(a)*r,3), "color": "#44aaff"})\n'
+            'emit_scene({"type": "points", "points": points, "color": "#44aaff"})\n'
+        )
+
+    # ── Tree / plant / nature ────────────────────────────────────────────────
+    if any(k in p for k in ("tree", "plant", "flower", "forest", "branch", "leaf", "fern", "nature")):
+        return (
+            "# Point cloud: recursive branching tree\n"
+            "import math\n"
+            "points = []\n"
+            "\n"
+            "def add_branch(x, y, z, axz, tilt, length, depth):\n"
+            "    if depth == 0 or length < 0.08:\n"
+            "        return\n"
+            "    steps = max(1, int(length * 16))\n"
+            "    for i in range(steps):\n"
+            "        t = i / steps\n"
+            "        bx = x + math.sin(axz) * math.sin(tilt) * t * length\n"
+            "        by = y + math.cos(tilt) * t * length\n"
+            "        bz = z + math.cos(axz) * math.sin(tilt) * t * length\n"
+            "        g = int(0x55 + depth * 0x1a)\n"
+            '        points.append({"x": round(bx,3), "y": round(by,3), "z": round(bz,3), "color": "#1a{:02x}1a".format(g)})\n'
+            "    nx = x + math.sin(axz) * math.sin(tilt) * length\n"
+            "    ny = y + math.cos(tilt) * length\n"
+            "    nz = z + math.cos(axz) * math.sin(tilt) * length\n"
+            "    for da, dt in [(-0.55, 0.28), (0.55, 0.28), (0.0, 0.08)]:\n"
+            "        add_branch(nx, ny, nz, axz + da, tilt + dt, length * 0.63, depth - 1)\n"
+            "\n"
+            "add_branch(0, -2.2, 0, 0, 0.08, 1.6, 5)\n"
+            'emit_scene({"type": "points", "points": points[:2500], "color": "#22aa22"})\n'
+        )
+
+    # ── Default: (2,3) torus knot — elegant, works for any unmatched subject ──
+    safe = prompt.replace("'", "").replace('"', "")[:60]
+    return (
+        f"# Auto-generated point cloud for: {safe}\n"
+        "import math\n"
+        "points = []\n"
+        "for i in range(2000):\n"
+        "    t = i / 2000 * 2 * math.pi\n"
+        "    # (2,3) torus knot\n"
+        "    theta, phi = t * 2, t * 3\n"
+        "    R, r = 1.6, 0.6\n"
+        "    x = (R + r * math.cos(phi)) * math.cos(theta)\n"
+        "    y = (R + r * math.cos(phi)) * math.sin(theta)\n"
+        "    z = r * math.sin(phi)\n"
+        "    h = i / 2000\n"
+        '    color = "#{:02x}{:02x}{:02x}".format(\n'
+        "        int(h * 0xff), int(0xd4 - h * 0x50), int(0xff - h * 0x66))\n"
+        '    points.append({"x": round(x,3), "y": round(y,3), "z": round(z,3), "color": color})\n'
+        'emit_scene({"type": "points", "points": points, "color": "#00d4ff"})\n'
+    )
+
+
 async def _generate_editor_script(prompt: str, room_id: str) -> None:
     """
-    Fast-completion hook — called concurrently after the image_scene broadcast.
-
-    Asks the Pollinations text API (free, no key) to write a minimal Python
-    point-cloud script tailored to the image's subject, then broadcasts it as
-    an ``update_editor_text`` frame so the frontend can pre-fill the editor.
-    Non-fatal: any exception is swallowed.
+    Pre-Fill hook — called concurrently after the image_scene broadcast.
+    Builds a keyword-matched Python point-cloud script locally (no network
+    call) and broadcasts it as an ``update_editor_text`` frame so the frontend
+    can pre-fill the Python Engine editor.  Non-fatal.
     """
     try:
-        instruction = (
-            f"Write a minimal Python script that builds a '{prompt}' shaped 3D point cloud "
-            f"and calls emit_scene(). Rules: import only math; build a list called 'points' "
-            f"where each element is a dict with keys x, y, z (floats) and color (CSS hex string); "
-            f"call emit_scene({{'type': 'points', 'points': points, 'color': '#00ffcc'}}). "
-            f"Reply with ONLY the raw Python code — no markdown fences, no prose, no comments."
-        )
-        encoded = urllib.parse.quote(instruction)
-        text_url = f"https://text.pollinations.ai/{encoded}?model=openai&seed=42"
-
-        loop = asyncio.get_event_loop()
-
-        def _fetch() -> str:
-            req = urllib.request.Request(
-                text_url, headers={"User-Agent": "Mozilla/5.0"}
-            )
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                return resp.read().decode("utf-8").strip()
-
-        script: str = await loop.run_in_executor(None, _fetch)
-
-        # Strip any markdown fences the model might add despite the instruction.
-        if "```" in script:
-            lines = script.splitlines()
-            script = "\n".join(
-                ln for ln in lines if not ln.strip().startswith("```")
-            ).strip()
-
+        script = _build_editor_script(prompt)
         if script:
             await manager.broadcast_to_room(room_id, {
                 "type": "update_editor_text",
                 "code": script,
             })
     except Exception:
-        pass  # best-effort; never let this crash the event loop
+        pass  # best-effort; never crash the event loop
 
 
 async def _process_image_to_scene(image_url: str, prompt: str = "", room_id: str = "global") -> None:
