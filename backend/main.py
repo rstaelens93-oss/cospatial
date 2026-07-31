@@ -978,10 +978,30 @@ async def _generate_editor_script(prompt: str, room_id: str) -> None:
 
         # ── 1. LLM path (async-safe: runs sync I/O in a thread) ────────────
         if _GROQ_API_KEY:
-            script = await asyncio.to_thread(_call_groq_sync, prompt)
-            if script:
-                print(f"[groq] script generated ({len(script)} chars) for: {prompt[:60]!r}",
+            candidate = await asyncio.to_thread(_call_groq_sync, prompt)
+            if candidate:
+                print(f"[groq] script generated ({len(candidate)} chars) for: {prompt[:60]!r}",
                       flush=True)
+
+                # ── 1a. Sandbox dry-run: validate before broadcasting ───────
+                # Prepend a no-op emit_scene so the sandbox can execute the
+                # script without access to the real WebSocket emitter.
+                _DRY_RUN_HEADER = "def emit_scene(data): pass\n"
+                dry_run_result: dict = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    execute_user_spatial_math,
+                    _DRY_RUN_HEADER + candidate,
+                    2.0,   # 2-second hard timeout
+                )
+                if dry_run_result["success"]:
+                    script = candidate
+                    print(f"[groq] dry-run passed for: {prompt[:60]!r}", flush=True)
+                else:
+                    print(
+                        f"[groq] dry-run FAILED for {prompt[:60]!r} — falling back. "
+                        f"Error: {dry_run_result['error']!r}",
+                        flush=True,
+                    )
 
         # ── 2. Fallback: instant local keyword dictionary ───────────────────
         if not script:
