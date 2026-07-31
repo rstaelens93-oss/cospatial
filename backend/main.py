@@ -99,24 +99,38 @@ _GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
 
 _LLM_SYSTEM_PROMPT = """\
 You are a Python code generator for 3D point-cloud visualizations.
-Output ONLY raw Python code — no markdown fences, no prose, no explanations.
-You may include a single comment line at the top (# title).
+Output ONLY raw Python code. No markdown fences. No prose. No explanations.
+One optional comment at the very top (# shape title) is allowed.
 
-Hard rules:
-- `math` is already imported. Do NOT write `import math` or any other import.
-- Do NOT define functions, classes, or nested scopes — top-level sequential code only.
-- Build a list named `points`; every element must be a dict:
-    {"x": float, "y": float, "z": float, "color": "#rrggbb"}
-- Target 800–2500 points for smooth real-time rendering.
-- Use custom parametric math formulas that genuinely model the 3D geometry
-  described by the user prompt (drones → rotor discs + fuselage; ships → hull
-  curve + mast; buildings → stacked floor rings; etc.).
-- Assign physically-inspired colors: gradient by height, radial layer, or
-  material zone. Avoid flat single-color fills.
-- The very last line of code must be exactly:
-    emit_scene({"type": "points", "points": points, "color": "#rrggbb"})
-  where #rrggbb is a representative accent hex color for the shape.
-Output nothing except the Python code block described above.\
+══════════════════ ABSOLUTE RULES ══════════════════
+1. DO NOT write any import statement. `math` is already available.
+2. DO NOT hardcode coordinate lists. NEVER write points = [{...},{...},...].
+   Every point MUST be computed inside a `for` loop using math formulas.
+3. DO NOT define functions or classes. Top-level sequential code only.
+4. Keep total points between 800 and 1200 — enough for visual density,
+   small enough to never run out of tokens before finishing.
+5. The VERY LAST line of code must be exactly:
+     emit_scene({"type": "points", "points": points, "color": "#rrggbb"})
+   Nothing may follow it.
+════════════════ REQUIRED STRUCTURE ════════════════
+points = []
+for i in range(<N>):
+    <parametric math with math.sin / math.cos / math.sqrt / math.pi>
+    x = ...
+    y = ...
+    z = ...
+    color = "#{:02x}{:02x}{:02x}".format(<r>, <g>, <b>)
+    points.append({"x": round(x, 3), "y": round(y, 3), "z": round(z, 3), "color": color})
+emit_scene({"type": "points", "points": points, "color": "#rrggbb"})
+════════════════ GEOMETRY GUIDANCE ═════════════════
+Model the 3D shape described by the user with custom math:
+  • Drone / quadcopter → 4 rotor discs (polar loops at offset positions) + slim box fuselage
+  • Ship / boat        → hull parabolic cross-section + waterline ring + mast vertical line
+  • Cathedral          → stacked arch rings that narrow toward the top + two tower columns
+  • Robot              → torso box + spherical head + four limb cylinders
+  • Network graph      → nodes on a sphere + edges as straight interpolated line segments
+Assign gradient colors by height (y), radial distance, or structural zone.
+Avoid single-color fills — color should reveal the shape's geometry.\
 """
 
 
@@ -895,12 +909,12 @@ def _call_groq_sync(prompt: str) -> str | None:
         return None
 
     payload = json.dumps({
-        "model": "llama-3.1-8b-instant",
+        "model": "llama-3.3-70b-versatile",   # stronger instruction-following than 8B
         "messages": [
             {"role": "system", "content": _LLM_SYSTEM_PROMPT},
             {"role": "user",   "content": f"Generate a 3D point cloud for: {prompt}"},
         ],
-        "max_tokens": 1200,
+        "max_tokens": 1500,
         "temperature": 0.15,   # low temp → deterministic, syntactically stable code
         "stream": False,
     }).encode()
@@ -926,6 +940,13 @@ def _call_groq_sync(prompt: str) -> str | None:
         raw = re.sub(r"^```(?:python)?\s*\n?", "", raw, flags=re.MULTILINE)
         raw = re.sub(r"\n?```\s*$",           "", raw, flags=re.MULTILINE)
         raw = raw.strip()
+
+        # Strip any stray import lines — the sandbox has math pre-imported and
+        # numpy / other packages are not available; remove them defensively.
+        raw = re.sub(r"^import\s+\S+.*$",       "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"^from\s+\S+\s+import.*$", "", raw, flags=re.MULTILINE)
+        # Collapse runs of blank lines left by removed imports.
+        raw = re.sub(r"\n{3,}", "\n\n", raw).strip()
 
         # Safety-net: generated code must contain both sentinel tokens.
         if "emit_scene" in raw and "points" in raw:
