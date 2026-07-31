@@ -6,7 +6,7 @@ import ConceptPanel from "@/components/panels/ConceptPanel";
 import PythonPanel from "@/components/panels/PythonPanel";
 import ImagePanel from "@/components/panels/ImagePanel";
 import ViewportPanel, { type ViewportPanelHandle } from "@/components/panels/ViewportPanel";
-import ChatBox from "@/components/ChatBox";
+import ChatBox, { CHAT_BAR_HEIGHT } from "@/components/ChatBox";
 import {
   Cpu,
   Activity,
@@ -268,14 +268,15 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* ── Strict 2×2 grid — each cell is exactly 50vw × 50vh ── */}
+      {/* ── 2×2 grid — fills exactly the space between header (44px) and chat bar ── */}
       <main
         style={{
           display: "grid",
-          gridTemplateColumns: "50vw 50vw",
-          gridTemplateRows: "50vh 50vh",
+          gridTemplateColumns: "50% 50%",
+          gridTemplateRows: "50% 50%",
           width: "100vw",
-          height: "100vh",
+          height: `calc(100vh - 44px - ${CHAT_BAR_HEIGHT}px)`,
+          marginTop: "44px",
           overflow: "hidden",
           gap: "1px",
           background: "hsl(213 18% 13%)", // gap colour — acts as divider lines

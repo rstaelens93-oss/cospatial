@@ -6,7 +6,7 @@ import {
   getListChatMessagesQueryKey,
 } from "@workspace/api-client-react";
 import type { ChatMessage } from "@workspace/api-client-react";
-import { MessageCircle, Minus, Send, Wifi, WifiOff, Terminal } from "lucide-react";
+import { MessageCircle, ChevronDown, Send, Wifi, WifiOff, Terminal } from "lucide-react";
 import { wsUrl as buildWsUrl } from "@/lib/endpoints";
 import type { SceneDataPayload } from "@/hooks/useWebSockets";
 
@@ -57,6 +57,12 @@ interface ChatBoxProps {
   onEditorText?: (code: string) => void;
 }
 
+// Height of the expanded chat body in px — must match the CSS value below.
+const BODY_HEIGHT = 380;
+// Height of the always-visible handle bar in px — exported so Dashboard can
+// push the grid up by exactly this amount.
+export const CHAT_BAR_HEIGHT = 38;
+
 export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [unread, setUnread] = useState(0);
@@ -68,23 +74,18 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
   const [wsMessages, setWsMessages] = useState<MessageItem[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const mountedRef = useRef(true);          // guard: no state updates after cleanup
-  const isExpandedRef = useRef(isExpanded); // stable ref so WS handler sees latest value
-  // Stable ref so the WS handler always sees the latest callback without
-  // being listed as an effect dependency (which would recreate the socket).
+  const mountedRef = useRef(true);
+  const isExpandedRef = useRef(isExpanded);
   const onSceneDataRef = useRef(onSceneData);
   useEffect(() => { onSceneDataRef.current = onSceneData; }, [onSceneData]);
   const onEditorTextRef = useRef(onEditorText);
   useEffect(() => { onEditorTextRef.current = onEditorText; }, [onEditorText]);
   const queryClient = useQueryClient();
 
-  // Keep isExpandedRef in sync so the WS handler sees the latest value
-  // without listing isExpanded as a WebSocket effect dependency.
   useEffect(() => {
     isExpandedRef.current = isExpanded;
   }, [isExpanded]);
 
-  // Track mount state so stale reconnect timers can't call setState after cleanup.
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
@@ -111,7 +112,6 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
     const seen = new Set<number>();
     const merged: MessageItem[] = [];
 
-    // Start with REST messages
     if (restMessages) {
       restMessages.forEach((m) => {
         seen.add(m.id);
@@ -119,7 +119,6 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
       });
     }
 
-    // Add WS messages not already in REST
     wsMessages.forEach((m) => {
       if ("kind" in m && (m as SystemEvent).kind === "system") {
         merged.push(m);
@@ -140,17 +139,12 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
   })();
 
   // WebSocket setup — mounts once only ([]).
-  // isExpandedRef lets the message handler read the latest expanded state
-  // without this effect needing isExpanded as a dependency (which would
-  // recreate the socket every open/close and leak stale reconnect timers).
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      // Bail out if the component has been unmounted.
       if (!mountedRef.current) return;
-
       if (mountedRef.current) setWsStatus("connecting");
 
       const wsUrl = buildWsUrl("/ws/chat");
@@ -181,7 +175,6 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
               });
             } else if (msg.type === "message" && msg.message) {
               setWsMessages((prev) => [...prev, msg.message]);
-              // Use ref so we never capture a stale isExpanded value.
               if (!isExpandedRef.current) {
                 setUnread((u) => u + 1);
               }
@@ -203,8 +196,6 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
               };
               setWsMessages((prev) => [...prev, sysMsg]);
             } else if (msg.type === "image_scene" && typeof msg.sceneData === "string") {
-              // Backend finished extracting the 2D→3D point cloud from the
-              // generated image — forward parsed payload to the viewport.
               try {
                 const parsed = JSON.parse(msg.sceneData) as SceneDataPayload;
                 onSceneDataRef.current?.(parsed);
@@ -219,12 +210,7 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
                 // malformed payload — discard silently
               }
             } else if (msg.type === "update_editor_text" && typeof msg.code === "string" && msg.code) {
-              // Backend is streaming a Python script for the latest image concept.
-              // Forward every frame (partial or final) to the editor so users see
-              // the code being written in real time.
               onEditorTextRef.current?.(msg.code as string);
-              // Only surface a system message when the stream is complete
-              // (partial: false) or for legacy frames that have no partial flag.
               if (msg.partial === false || msg.partial === undefined) {
                 const sysMsg: SystemEvent = {
                   id: `sys-${Date.now()}`,
@@ -243,14 +229,12 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
         ws.onclose = () => {
           if (!mountedRef.current) return;
           setWsStatus("disconnected");
-          // Reconnect after delay — but only if still mounted.
           reconnectTimer = setTimeout(() => {
             if (mountedRef.current) connect();
           }, 4000);
         };
 
         ws.onerror = () => {
-          // Don't re-throw — just close; onclose will schedule the reconnect.
           ws?.close();
         };
       } catch {
@@ -265,11 +249,9 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
     connect();
 
     return () => {
-      // Signal unmount so in-flight timers and handlers are no-ops.
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       const current = wsRef.current;
       if (current) {
-        // Null out handlers before closing so onclose doesn't queue a reconnect.
         current.onclose = null;
         current.onerror = null;
         current.onmessage = null;
@@ -280,14 +262,14 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll
+  // Auto-scroll when messages change or panel opens
   useEffect(() => {
     if (isExpanded) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [allChatMessages, isExpanded]);
 
-  // Clear unread when expanded
+  // Clear unread badge when user opens the panel
   useEffect(() => {
     if (isExpanded) setUnread(0);
   }, [isExpanded]);
@@ -297,13 +279,11 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
     const content = input.trim();
     setInput("");
 
-    // Try WebSocket first
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({ type: "message", content, author })
       );
     } else {
-      // REST fallback
       sendMessage.mutate({ data: { content, author } });
     }
   }, [input, author, sendMessage]);
@@ -315,44 +295,284 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
     }
   };
 
-  if (!isExpanded) {
-    return (
-      <button
-        data-testid="button-chat-toggle"
-        onClick={() => setIsExpanded(true)}
-        className="fixed bottom-4 left-4 z-50 flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-all duration-200"
+  // ─── Single render — no early return ────────────────────────────────────────
+  // The component is always in the DOM. The chat body slides up/down via a
+  // maxHeight transition; only the handle bar is visible when collapsed.
+  return (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 0,
+        left: 0,
+        width: "100%",
+        zIndex: 1000,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {/* ── Chat body — maxHeight drives the slide animation ── */}
+      <div
         style={{
-          background: "hsl(215 24% 11%)",
-          border: "1px solid rgba(0, 212, 255, 0.25)",
-          color: "hsl(200 20% 80%)",
-          boxShadow: "0 4px 16px rgba(0,0,0,0.6)",
-        }}
-        onMouseEnter={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(0, 212, 255, 0.5)";
-          (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 16px rgba(0, 212, 255, 0.15), 0 4px 16px rgba(0,0,0,0.6)";
-        }}
-        onMouseLeave={(e) => {
-          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(0, 212, 255, 0.25)";
-          (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 4px 16px rgba(0,0,0,0.6)";
+          maxHeight: isExpanded ? `${BODY_HEIGHT}px` : "0px",
+          transition: "max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1)",
+          overflow: "hidden",
         }}
       >
-        <MessageCircle size={14} style={{ color: "#00d4ff" }} />
-        <span>Chat</span>
-        {unread > 0 && (
-          <span
-            className="flex items-center justify-center rounded-full text-xs font-bold min-w-[18px] h-[18px] px-1"
+        {/* Fixed-height inner so flex children compute correctly */}
+        <div
+          data-testid="chat-panel"
+          style={{
+            height: `${BODY_HEIGHT}px`,
+            display: "flex",
+            flexDirection: "column",
+            background: "hsl(215 24% 9%)",
+            borderTop: "1px solid rgba(0, 212, 255, 0.25)",
+            boxShadow: "0 -4px 32px rgba(0, 0, 0, 0.6), 0 -1px 0 rgba(0, 212, 255, 0.08)",
+          }}
+        >
+          {/* Author config row */}
+          <div
             style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "0 12px",
+              height: "34px",
+              borderBottom: "1px solid hsl(213 18% 14%)",
+              background: "hsl(215 24% 10%)",
+            }}
+          >
+            <span style={{ color: "hsl(200 15% 40%)", fontSize: "11px", fontFamily: "var(--app-font-mono)" }}>
+              You:
+            </span>
+            <input
+              data-testid="input-chat-author"
+              type="text"
+              value={author}
+              onChange={(e) => {
+                setAuthor(e.target.value);
+                localStorage.setItem(AUTHOR_KEY, e.target.value);
+              }}
+              style={{
+                flex: 1,
+                background: "transparent",
+                border: "none",
+                outline: "none",
+                color: "#00d4ff",
+                fontSize: "11px",
+                fontFamily: "var(--app-font-mono)",
+              }}
+            />
+            {/* WS status */}
+            <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+              {wsStatus === "connected" ? (
+                <Wifi size={11} style={{ color: "#34d399" }} />
+              ) : wsStatus === "connecting" ? (
+                <Wifi size={11} style={{ color: "#f59e0b" }} className="animate-pulse" />
+              ) : (
+                <WifiOff size={11} style={{ color: "#ef4444" }} />
+              )}
+              <span style={{
+                fontSize: "10px",
+                fontFamily: "var(--app-font-mono)",
+                color: wsStatus === "connected" ? "#34d399" : wsStatus === "connecting" ? "#f59e0b" : "#ef4444",
+              }}>
+                {wsStatus}
+              </span>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "8px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px",
+              minHeight: 0,
+            }}
+          >
+            {allChatMessages.length === 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "8px" }}>
+                <MessageCircle size={20} style={{ color: "hsl(200 15% 28%)" }} />
+                <p style={{ color: "hsl(200 15% 38%)", fontSize: "12px", textAlign: "center", margin: 0 }}>
+                  No messages yet.<br />Say something to start.
+                </p>
+              </div>
+            ) : (
+              allChatMessages.map((msg, idx) => {
+                if ("kind" in msg && (msg as SystemEvent).kind === "system") {
+                  const sysMsg = msg as SystemEvent;
+                  return (
+                    <div key={sysMsg.id} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <Terminal size={10} style={{ color: "hsl(200 15% 35%)", flexShrink: 0 }} />
+                      <span style={{
+                        fontSize: "10px",
+                        fontFamily: "var(--app-font-mono)",
+                        color: "hsl(200 15% 38%)",
+                      }}>
+                        {sysMsg.content}
+                      </span>
+                    </div>
+                  );
+                }
+                const chatMsg = msg as ChatMessage;
+                return (
+                  <div key={`chat-${chatMsg.id}-${idx}`} data-testid={`message-${chatMsg.id}`}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "6px", marginBottom: "2px" }}>
+                      <span style={{
+                        fontSize: "11px",
+                        fontWeight: 600,
+                        color: getAuthorColor(chatMsg.author),
+                        fontFamily: "var(--app-font-mono)",
+                      }}>
+                        {chatMsg.author}
+                      </span>
+                      <span style={{ fontSize: "10px", color: "hsl(200 15% 30%)" }}>
+                        {formatRelTime(chatMsg.createdAt)}
+                      </span>
+                    </div>
+                    <p style={{ margin: 0, fontSize: "12px", lineHeight: "1.5", color: "hsl(200 15% 70%)" }}>
+                      {chatMsg.content}
+                    </p>
+                  </div>
+                );
+              })
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input bar */}
+          <div
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "8px 12px",
+              borderTop: "1px solid hsl(213 18% 16%)",
+            }}
+          >
+            <input
+              data-testid="input-chat-message"
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Type a message..."
+              style={{
+                flex: 1,
+                background: "transparent",
+                border: "none",
+                outline: "none",
+                fontSize: "12px",
+                color: "hsl(200 20% 82%)",
+              }}
+            />
+            <button
+              data-testid="button-chat-send"
+              onClick={handleSend}
+              disabled={!input.trim()}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: "28px",
+                height: "28px",
+                borderRadius: "4px",
+                border: "1px solid rgba(0, 212, 255, 0.25)",
+                background: "rgba(0, 212, 255, 0.1)",
+                color: "#00d4ff",
+                cursor: input.trim() ? "pointer" : "default",
+                opacity: input.trim() ? 1 : 0.3,
+                flexShrink: 0,
+              }}
+            >
+              <Send size={12} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Handle bar — always visible, drives open/close ── */}
+      <button
+        data-testid="button-chat-toggle"
+        onClick={() => setIsExpanded((e) => !e)}
+        style={{
+          width: "100%",
+          height: `${CHAT_BAR_HEIGHT}px`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "8px",
+          cursor: "pointer",
+          background: "hsl(215 24% 11%)",
+          borderTop: "1px solid rgba(0, 212, 255, 0.2)",
+          borderLeft: "none",
+          borderRight: "none",
+          borderBottom: "none",
+          borderRadius: 0,
+          flexShrink: 0,
+          transition: "background 0.15s",
+          boxShadow: "0 -1px 0 rgba(0, 212, 255, 0.08)",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.background = "hsl(215 24% 14%)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.background = "hsl(215 24% 11%)";
+        }}
+      >
+        {isExpanded ? (
+          <ChevronDown size={13} style={{ color: "#00d4ff" }} />
+        ) : (
+          <MessageCircle size={13} style={{ color: "#00d4ff" }} />
+        )}
+
+        <span
+          style={{
+            fontSize: "11px",
+            fontFamily: "var(--app-font-mono)",
+            letterSpacing: "0.08em",
+            color: "hsl(200 20% 65%)",
+            userSelect: "none",
+          }}
+        >
+          {isExpanded ? "CLOSE CHAT" : "💬  Click to Open Chat"}
+        </span>
+
+        {/* Unread badge */}
+        {!isExpanded && unread > 0 && (
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minWidth: "18px",
+              height: "18px",
+              padding: "0 4px",
+              borderRadius: "9px",
               background: "#00d4ff",
               color: "hsl(215 28% 7%)",
               fontSize: "10px",
+              fontWeight: 700,
+              fontFamily: "var(--app-font-mono)",
             }}
           >
             {unread > 9 ? "9+" : unread}
           </span>
         )}
+
+        {/* WS status dot */}
         <span
-          className="w-1.5 h-1.5 rounded-full"
           style={{
+            width: "6px",
+            height: "6px",
+            borderRadius: "50%",
+            flexShrink: 0,
             background:
               wsStatus === "connected"
                 ? "#34d399"
@@ -362,186 +582,6 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
           }}
         />
       </button>
-    );
-  }
-
-  return (
-    <div
-      data-testid="chat-panel"
-      className="fixed bottom-4 left-4 z-50 flex flex-col rounded-lg overflow-hidden"
-      style={{
-        width: "320px",
-        height: "420px",
-        background: "hsl(215 24% 9%)",
-        border: "1px solid rgba(0, 212, 255, 0.2)",
-        boxShadow: "0 8px 40px rgba(0,0,0,0.8), 0 0 24px rgba(0, 212, 255, 0.06)",
-      }}
-    >
-      {/* Header */}
-      <div
-        className="flex items-center gap-2 px-3 py-2.5 flex-shrink-0 relative panel-header-accent"
-        style={{
-          background: "hsl(215 24% 11%)",
-          borderBottom: "1px solid hsl(213 18% 16%)",
-        }}
-      >
-        <div
-          className="w-5 h-5 rounded flex items-center justify-center"
-          style={{
-            background: "rgba(0, 212, 255, 0.1)",
-            border: "1px solid rgba(0, 212, 255, 0.2)",
-          }}
-        >
-          <MessageCircle size={11} style={{ color: "#00d4ff" }} />
-        </div>
-        <span
-          className="text-xs font-semibold tracking-wider uppercase flex-1"
-          style={{ color: "hsl(200 20% 82%)" }}
-        >
-          Live Chat
-        </span>
-
-        {/* WS status indicator */}
-        <div className="flex items-center gap-1.5 mr-1">
-          {wsStatus === "connected" ? (
-            <Wifi size={11} style={{ color: "#34d399" }} />
-          ) : wsStatus === "connecting" ? (
-            <Wifi size={11} style={{ color: "#f59e0b" }} className="animate-pulse" />
-          ) : (
-            <WifiOff size={11} style={{ color: "#ef4444" }} />
-          )}
-          <span className="text-xs" style={{
-            color: wsStatus === "connected" ? "#34d399" : wsStatus === "connecting" ? "#f59e0b" : "#ef4444",
-            fontSize: "10px",
-          }}>
-            {wsStatus}
-          </span>
-        </div>
-
-        <button
-          data-testid="button-chat-minimize"
-          onClick={() => setIsExpanded(false)}
-          className="p-1 rounded transition-colors"
-          style={{ color: "hsl(200 15% 45%)" }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#00d4ff"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "hsl(200 15% 45%)"; }}
-        >
-          <Minus size={12} />
-        </button>
-      </div>
-
-      {/* Author config row */}
-      <div
-        className="flex items-center gap-2 px-3 py-1.5 flex-shrink-0"
-        style={{ borderBottom: "1px solid hsl(213 18% 14%)" }}
-      >
-        <span className="text-xs" style={{ color: "hsl(200 15% 40%)" }}>You:</span>
-        <input
-          data-testid="input-chat-author"
-          type="text"
-          value={author}
-          onChange={(e) => {
-            setAuthor(e.target.value);
-            localStorage.setItem(AUTHOR_KEY, e.target.value);
-          }}
-          className="flex-1 bg-transparent text-xs outline-none"
-          style={{
-            color: "#00d4ff",
-            fontFamily: "var(--app-font-mono)",
-          }}
-        />
-      </div>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2 min-h-0">
-        {allChatMessages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-2">
-            <MessageCircle size={20} style={{ color: "hsl(200 15% 28%)" }} />
-            <p className="text-xs text-center" style={{ color: "hsl(200 15% 38%)" }}>
-              No messages yet.
-              <br />Say something to start.
-            </p>
-          </div>
-        ) : (
-          allChatMessages.map((msg, idx) => {
-            if ("kind" in msg && (msg as SystemEvent).kind === "system") {
-              const sysMsg = msg as SystemEvent;
-              return (
-                <div
-                  key={sysMsg.id}
-                  className="flex items-center gap-2"
-                >
-                  <Terminal size={10} style={{ color: "hsl(200 15% 35%)" }} className="flex-shrink-0" />
-                  <span className="text-xs" style={{ color: "hsl(200 15% 38%)", fontFamily: "var(--app-font-mono)", fontSize: "10px" }}>
-                    {sysMsg.content}
-                  </span>
-                </div>
-              );
-            }
-            const chatMsg = msg as ChatMessage;
-            return (
-              <div key={`chat-${chatMsg.id}-${idx}`} className="group" data-testid={`message-${chatMsg.id}`}>
-                <div className="flex items-baseline gap-1.5 mb-0.5">
-                  <span
-                    className="text-xs font-semibold"
-                    style={{ color: getAuthorColor(chatMsg.author), fontFamily: "var(--app-font-mono)", fontSize: "11px" }}
-                  >
-                    {chatMsg.author}
-                  </span>
-                  <span className="text-xs" style={{ color: "hsl(200 15% 30%)", fontSize: "10px" }}>
-                    {formatRelTime(chatMsg.createdAt)}
-                  </span>
-                </div>
-                <p
-                  className="text-xs leading-relaxed pl-0"
-                  style={{ color: "hsl(200 15% 70%)" }}
-                >
-                  {chatMsg.content}
-                </p>
-              </div>
-            );
-          })
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input bar */}
-      <div
-        className="flex-shrink-0 flex items-center gap-2 px-3 py-2"
-        style={{ borderTop: "1px solid hsl(213 18% 16%)" }}
-      >
-        <input
-          data-testid="input-chat-message"
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Type a message..."
-          className="flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
-          style={{ color: "hsl(200 20% 82%)" }}
-        />
-        <button
-          data-testid="button-chat-send"
-          onClick={handleSend}
-          disabled={!input.trim()}
-          className="flex items-center justify-center w-7 h-7 rounded transition-all duration-150 disabled:opacity-30"
-          style={{
-            background: "rgba(0, 212, 255, 0.1)",
-            border: "1px solid rgba(0, 212, 255, 0.25)",
-            color: "#00d4ff",
-          }}
-          onMouseEnter={(e) => {
-            if (input.trim()) {
-              (e.currentTarget as HTMLButtonElement).style.background = "rgba(0, 212, 255, 0.2)";
-            }
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = "rgba(0, 212, 255, 0.1)";
-          }}
-        >
-          <Send size={12} />
-        </button>
-      </div>
     </div>
   );
 }
