@@ -52,9 +52,12 @@ interface ChatBoxProps {
   /** Called whenever the backend broadcasts an image_scene frame with a
    *  parsed SceneDataPayload so the dashboard can forward it to the viewport. */
   onSceneData?: (data: SceneDataPayload) => void;
+  /** Called when the backend broadcasts an update_editor_text frame so the
+   *  dashboard can pre-fill the Python Engine editor. */
+  onEditorText?: (code: string) => void;
 }
 
-export default function ChatBox({ onSceneData }: ChatBoxProps) {
+export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [unread, setUnread] = useState(0);
   const [input, setInput] = useState("");
@@ -71,6 +74,8 @@ export default function ChatBox({ onSceneData }: ChatBoxProps) {
   // being listed as an effect dependency (which would recreate the socket).
   const onSceneDataRef = useRef(onSceneData);
   useEffect(() => { onSceneDataRef.current = onSceneData; }, [onSceneData]);
+  const onEditorTextRef = useRef(onEditorText);
+  useEffect(() => { onEditorTextRef.current = onEditorText; }, [onEditorText]);
   const queryClient = useQueryClient();
 
   // Keep isExpandedRef in sync so the WS handler sees the latest value
@@ -213,6 +218,17 @@ export default function ChatBox({ onSceneData }: ChatBoxProps) {
               } catch {
                 // malformed payload — discard silently
               }
+            } else if (msg.type === "update_editor_text" && typeof msg.code === "string" && msg.code) {
+              // Backend generated a Python script matching the image concept —
+              // forward it to the dashboard so the editor can be pre-filled.
+              onEditorTextRef.current?.(msg.code as string);
+              const sysMsg: SystemEvent = {
+                id: `sys-${Date.now()}`,
+                kind: "system",
+                content: "Python Engine pre-filled — inspect and run when ready.",
+                createdAt: new Date().toISOString(),
+              };
+              setWsMessages((prev) => [...prev, sysMsg]);
             }
           } catch {
             // ignore JSON parse errors

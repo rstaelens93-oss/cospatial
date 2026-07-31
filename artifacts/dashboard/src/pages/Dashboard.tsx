@@ -96,6 +96,7 @@ export default function Dashboard() {
   const [sceneData, setSceneData] = useState<string | null>(null);
   const [conceptPanelStatus, setConceptPanelStatus] = useState<"active" | "idle" | "processing">("idle");
   const [pythonPanelStatus, setPythonPanelStatus] = useState<"active" | "idle" | "processing">("idle");
+  const [injectedCode, setInjectedCode] = useState<string | undefined>(undefined);
   const viewportRef = useRef<ViewportPanelHandle>(null);
 
   // True when the loaded scene contains a point cloud (enables Export PLY button)
@@ -137,6 +138,12 @@ export default function Dashboard() {
   const handleWsSceneData = useCallback((data: SceneDataPayload) => {
     setSceneData(JSON.stringify(data));
     setPythonPanelStatus("active");
+  }, []);
+
+  // WebSocket path: update_editor_text frame → pre-fill Python Engine editor.
+  // Wraps in an object so repeated identical scripts still trigger the effect.
+  const handleEditorText = useCallback((code: string) => {
+    setInjectedCode(code);
   }, []);
 
   // Merge the live Pollinations URL into the concept object ImagePanel receives.
@@ -339,7 +346,7 @@ export default function Dashboard() {
             badge="PYTHON"
           />
           <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
-            <PythonPanel onSceneData={handleSceneData} />
+            <PythonPanel onSceneData={handleSceneData} injectedCode={injectedCode} />
           </div>
         </div>
 
@@ -401,8 +408,8 @@ export default function Dashboard() {
         </div>
       </main>
 
-      {/* ── Floating chat box — also relays image_scene WS frames to viewport ── */}
-      <ChatBox onSceneData={handleWsSceneData} />
+      {/* ── Floating chat box — relays image_scene and update_editor_text frames ── */}
+      <ChatBox onSceneData={handleWsSceneData} onEditorText={handleEditorText} />
     </div>
   );
 }

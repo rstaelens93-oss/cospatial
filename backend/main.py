@@ -587,7 +587,54 @@ def _image_to_volumetric_points(image_url: str) -> list[dict[str, Any]] | None:
     return points
 
 
-async def _process_image_to_scene(image_url: str, room_id: str = "global") -> None:
+async def _generate_editor_script(prompt: str, room_id: str) -> None:
+    """
+    Fast-completion hook — called concurrently after the image_scene broadcast.
+
+    Asks the Pollinations text API (free, no key) to write a minimal Python
+    point-cloud script tailored to the image's subject, then broadcasts it as
+    an ``update_editor_text`` frame so the frontend can pre-fill the editor.
+    Non-fatal: any exception is swallowed.
+    """
+    try:
+        instruction = (
+            f"Write a minimal Python script that builds a '{prompt}' shaped 3D point cloud "
+            f"and calls emit_scene(). Rules: import only math; build a list called 'points' "
+            f"where each element is a dict with keys x, y, z (floats) and color (CSS hex string); "
+            f"call emit_scene({{'type': 'points', 'points': points, 'color': '#00ffcc'}}). "
+            f"Reply with ONLY the raw Python code — no markdown fences, no prose, no comments."
+        )
+        encoded = urllib.parse.quote(instruction)
+        text_url = f"https://text.pollinations.ai/{encoded}?model=openai&seed=42"
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch() -> str:
+            req = urllib.request.Request(
+                text_url, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                return resp.read().decode("utf-8").strip()
+
+        script: str = await loop.run_in_executor(None, _fetch)
+
+        # Strip any markdown fences the model might add despite the instruction.
+        if "```" in script:
+            lines = script.splitlines()
+            script = "\n".join(
+                ln for ln in lines if not ln.strip().startswith("```")
+            ).strip()
+
+        if script:
+            await manager.broadcast_to_room(room_id, {
+                "type": "update_editor_text",
+                "code": script,
+            })
+    except Exception:
+        pass  # best-effort; never let this crash the event loop
+
+
+async def _process_image_to_scene(image_url: str, prompt: str = "", room_id: str = "global") -> None:
     """
     Background async task — geometric hemisphere projection pipeline.
 
@@ -631,6 +678,10 @@ async def _process_image_to_scene(image_url: str, room_id: str = "global") -> No
             "executionTime": elapsed_ms,
         })
 
+        # Fire the editor pre-fill concurrently — does not block the image pipeline.
+        if prompt:
+            asyncio.create_task(_generate_editor_script(prompt, room_id))
+
     except Exception:
         pass  # background task — never propagate to the event loop
 
@@ -673,7 +724,7 @@ async def generate_image(request: Request) -> dict:
     # Fire-and-forget: fetch + extract + broadcast runs after we respond.
     # Pollinations renders the image on first GET, so the background task
     # uses the same URL the frontend will display in <img src=...>.
-    asyncio.create_task(_process_image_to_scene(image_url, room_id))
+    asyncio.create_task(_process_image_to_scene(image_url, raw_prompt, room_id))
 
     return {"imageUrl": image_url}
 

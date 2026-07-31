@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import Editor from "@monaco-editor/react";
 import { Play, Terminal, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useExecuteCode } from "@workspace/api-client-react";
@@ -25,10 +25,20 @@ emit_scene({
 
 interface PythonPanelProps {
   onSceneData: (sceneData: string) => void;
+  /** When set, the backend has pre-generated a Python script for the latest
+   *  image concept. The editor is immediately updated but remains fully editable. */
+  injectedCode?: string;
 }
 
-export default function PythonPanel({ onSceneData }: PythonPanelProps) {
+export default function PythonPanel({ onSceneData, injectedCode }: PythonPanelProps) {
   const [code, setCode] = useState(DEFAULT_CODE);
+
+  // Pre-fill the editor whenever the backend sends a new generated script.
+  // The Monaco editor's onChange handler still fires normally so the user
+  // can edit freely after injection.
+  useEffect(() => {
+    if (injectedCode) setCode(injectedCode);
+  }, [injectedCode]);
   const [lastResult, setLastResult] = useState<CodeResult | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
 
