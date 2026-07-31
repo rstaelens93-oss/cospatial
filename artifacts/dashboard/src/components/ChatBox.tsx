@@ -219,16 +219,21 @@ export default function ChatBox({ onSceneData, onEditorText }: ChatBoxProps) {
                 // malformed payload — discard silently
               }
             } else if (msg.type === "update_editor_text" && typeof msg.code === "string" && msg.code) {
-              // Backend generated a Python script matching the image concept —
-              // forward it to the dashboard so the editor can be pre-filled.
+              // Backend is streaming a Python script for the latest image concept.
+              // Forward every frame (partial or final) to the editor so users see
+              // the code being written in real time.
               onEditorTextRef.current?.(msg.code as string);
-              const sysMsg: SystemEvent = {
-                id: `sys-${Date.now()}`,
-                kind: "system",
-                content: "Python Engine pre-filled — inspect and run when ready.",
-                createdAt: new Date().toISOString(),
-              };
-              setWsMessages((prev) => [...prev, sysMsg]);
+              // Only surface a system message when the stream is complete
+              // (partial: false) or for legacy frames that have no partial flag.
+              if (msg.partial === false || msg.partial === undefined) {
+                const sysMsg: SystemEvent = {
+                  id: `sys-${Date.now()}`,
+                  kind: "system",
+                  content: "Python Engine pre-filled — inspect and run when ready.",
+                  createdAt: new Date().toISOString(),
+                };
+                setWsMessages((prev) => [...prev, sysMsg]);
+              }
             }
           } catch {
             // ignore JSON parse errors

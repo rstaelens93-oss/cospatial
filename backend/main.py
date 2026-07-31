@@ -897,25 +897,175 @@ def _build_editor_script(prompt: str) -> str:
     )
 
 
-def _call_groq_sync(prompt: str) -> str | None:
+def _groq_post_process(raw: str) -> str | None:
     """
-    Synchronous Groq REST call — intended to run inside asyncio.to_thread()
-    so it never blocks the event loop.
+    Shared cleanup applied to any raw Groq response (streaming or non-streaming).
+    Returns the cleaned script on success or None if the safety-net check fails.
+    """
+    # Strip markdown code fences if the model disobeys the system prompt.
+    raw = re.sub(r"^```(?:python)?\s*\n?", "", raw, flags=re.MULTILINE)
+    raw = re.sub(r"\n?```\s*$",            "", raw, flags=re.MULTILINE)
+    raw = raw.strip()
 
-    Model: llama-3.1-8b-instant (free tier, ~800 tok/s on Groq infra).
-    Returns the raw generated Python string on success, None on any failure.
+    # Strip any stray import lines — the sandbox has math pre-imported and
+    # numpy / other packages are not available; remove them defensively.
+    raw = re.sub(r"^import\s+\S+.*$",       "", raw, flags=re.MULTILINE)
+    raw = re.sub(r"^from\s+\S+\s+import.*$", "", raw, flags=re.MULTILINE)
+    # Collapse runs of blank lines left by removed imports.
+    raw = re.sub(r"\n{3,}", "\n\n", raw).strip()
+
+    # Safety-net: generated code must contain both sentinel tokens.
+    if "emit_scene" in raw and "points" in raw:
+        return raw
+    return None
+
+
+def _stream_groq_to_queue(
+    prompt: str,
+    loop: asyncio.AbstractEventLoop,
+    queue: "asyncio.Queue[tuple[str, bool] | None]",
+) -> None:
+    """
+    Blocking SSE reader — runs inside a thread-pool executor.
+
+    Reads server-sent events from the Groq streaming endpoint and deposits
+    ``(delta_text, is_done)`` tuples into *queue* via ``run_coroutine_threadsafe``.
+    Deposits ``None`` on any error so the consumer can bail out.
     """
     if not _GROQ_API_KEY:
-        return None
+        asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+        return
 
     payload = json.dumps({
-        "model": "llama-3.3-70b-versatile",   # stronger instruction-following than 8B
+        "model": "llama-3.3-70b-versatile",
         "messages": [
             {"role": "system", "content": _LLM_SYSTEM_PROMPT},
             {"role": "user",   "content": f"Generate a 3D point cloud for: {prompt}"},
         ],
         "max_tokens": 1500,
-        "temperature": 0.15,   # low temp → deterministic, syntactically stable code
+        "temperature": 0.15,
+        "stream": True,
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {_GROQ_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "groq-python/1.0",
+        },
+        method="POST",
+    )
+
+    def _put(item: "tuple[str, bool] | None") -> None:
+        asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8").rstrip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    _put(("", True))
+                    return
+                try:
+                    chunk = json.loads(data_str)
+                    delta = chunk["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        _put((delta, False))
+                except Exception:
+                    continue
+        # Stream ended cleanly without an explicit [DONE] line.
+        _put(("", True))
+    except Exception as exc:
+        print(f"[groq] stream thread failed: {exc}", flush=True)
+        _put(None)
+
+
+async def _stream_groq_script(prompt: str, room_id: str) -> str | None:
+    """
+    Drive Groq streaming for *prompt*, broadcasting incremental
+    ``update_editor_text`` frames (``partial: true``) to *room_id* as text
+    accumulates.
+
+    Broadcasts a partial frame roughly every ``BROADCAST_EVERY`` characters so
+    the editor shows a smooth typewriter effect without flooding the WebSocket.
+
+    Returns the full cleaned script string on success, or ``None`` if the
+    stream fails before finishing.
+    """
+    BROADCAST_EVERY = 60  # characters between partial broadcasts
+
+    loop = asyncio.get_event_loop()
+    queue: "asyncio.Queue[tuple[str, bool] | None]" = asyncio.Queue()
+
+    # Launch the blocking SSE reader in a thread so the event loop stays free.
+    reader_future = loop.run_in_executor(
+        None, _stream_groq_to_queue, prompt, loop, queue
+    )
+
+    accumulated = ""
+    last_broadcast_len = 0
+
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                print("[groq] stream queue timeout", flush=True)
+                return None
+
+            if item is None:
+                # Thread reported an error.
+                return None
+
+            delta, is_done = item
+            accumulated += delta
+
+            if is_done:
+                break
+
+            # Broadcast a partial frame when enough new text has accumulated.
+            if len(accumulated) - last_broadcast_len >= BROADCAST_EVERY:
+                await manager.broadcast_to_room(room_id, {
+                    "type":    "update_editor_text",
+                    "code":    accumulated,
+                    "partial": True,
+                })
+                last_broadcast_len = len(accumulated)
+
+    finally:
+        # Always wait for the reader thread to finish so we don't leak executors.
+        try:
+            await asyncio.wait_for(reader_future, timeout=5.0)
+        except Exception:
+            pass
+
+    return _groq_post_process(accumulated)
+
+
+def _call_groq_sync(prompt: str) -> str | None:
+    """
+    Non-streaming Groq REST call — kept as a reference/fallback path.
+
+    Intended to run inside ``asyncio.to_thread()`` so it never blocks the
+    event loop.  In normal operation the streaming path is preferred; this is
+    only used if the streaming path is explicitly bypassed.
+    """
+    if not _GROQ_API_KEY:
+        return None
+
+    payload = json.dumps({
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+            {"role": "user",   "content": f"Generate a 3D point cloud for: {prompt}"},
+        ],
+        "max_tokens": 1500,
+        "temperature": 0.15,
         "stream": False,
     }).encode()
 
@@ -933,27 +1083,8 @@ def _call_groq_sync(prompt: str) -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
-
         raw: str = data["choices"][0]["message"]["content"].strip()
-
-        # Strip markdown code fences if the model disobeys the system prompt.
-        raw = re.sub(r"^```(?:python)?\s*\n?", "", raw, flags=re.MULTILINE)
-        raw = re.sub(r"\n?```\s*$",           "", raw, flags=re.MULTILINE)
-        raw = raw.strip()
-
-        # Strip any stray import lines — the sandbox has math pre-imported and
-        # numpy / other packages are not available; remove them defensively.
-        raw = re.sub(r"^import\s+\S+.*$",       "", raw, flags=re.MULTILINE)
-        raw = re.sub(r"^from\s+\S+\s+import.*$", "", raw, flags=re.MULTILINE)
-        # Collapse runs of blank lines left by removed imports.
-        raw = re.sub(r"\n{3,}", "\n\n", raw).strip()
-
-        # Safety-net: generated code must contain both sentinel tokens.
-        if "emit_scene" in raw and "points" in raw:
-            return raw
-
-        return None
-
+        return _groq_post_process(raw)
     except Exception as exc:
         print(f"[groq] call failed: {exc}", flush=True)
         return None
@@ -964,26 +1095,31 @@ async def _generate_editor_script(prompt: str, room_id: str) -> None:
     Pre-Fill hook — called concurrently after the image_scene broadcast.
 
     Pipeline:
-      1. Try Groq LLM (llama-3.1-8b-instant, free tier) for a fully dynamic,
-         prompt-aware point-cloud script with custom math formulas.
-      2. Fall back to the local keyword-dictionary (_build_editor_script) if
-         GROQ_API_KEY is absent, the API is unreachable, or the response fails
-         the emit_scene / points safety check.
+      1. Stream Groq LLM tokens to the room, broadcasting incremental
+         ``update_editor_text`` frames with ``partial: true`` so users see
+         the script being written in real time.
+      2. After the stream completes, validate the full text with a sandbox
+         dry-run.  If it passes, broadcast the final frame (``partial: false``).
+         If validation fails, fall back to the keyword dictionary and broadcast
+         the fallback as the final frame (overwriting the partial stream).
+      3. If GROQ_API_KEY is absent or the stream errors before finishing,
+         fall straight to the keyword-dictionary fallback.
 
-    Broadcasts the result as an ``update_editor_text`` WebSocket frame.
     Non-fatal — exceptions are swallowed so this never disrupts the event loop.
     """
     try:
         script: str | None = None
 
-        # ── 1. LLM path (async-safe: runs sync I/O in a thread) ────────────
+        # ── 1. Streaming LLM path ───────────────────────────────────────────
         if _GROQ_API_KEY:
-            candidate = await asyncio.to_thread(_call_groq_sync, prompt)
+            candidate = await _stream_groq_script(prompt, room_id)
             if candidate:
-                print(f"[groq] script generated ({len(candidate)} chars) for: {prompt[:60]!r}",
-                      flush=True)
+                print(
+                    f"[groq] stream complete ({len(candidate)} chars) for: {prompt[:60]!r}",
+                    flush=True,
+                )
 
-                # ── 1a. Sandbox dry-run: validate before broadcasting ───────
+                # ── 1a. Sandbox dry-run on the complete text ───────────────
                 # Prepend a no-op emit_scene so the sandbox can execute the
                 # script without access to the real WebSocket emitter.
                 _DRY_RUN_HEADER = "def emit_scene(data): pass\n"
@@ -999,7 +1135,7 @@ async def _generate_editor_script(prompt: str, room_id: str) -> None:
                 else:
                     print(
                         f"[groq] dry-run FAILED for {prompt[:60]!r} — falling back. "
-                        f"Error: {dry_run_result['error']!r}",
+                        f"Error: {dry_run_result.get('error', '')!r}",
                         flush=True,
                     )
 
@@ -1008,10 +1144,15 @@ async def _generate_editor_script(prompt: str, room_id: str) -> None:
             script = _build_editor_script(prompt)
             print(f"[groq] using keyword fallback for: {prompt[:60]!r}", flush=True)
 
+        # ── 3. Final frame signals completion to the frontend ───────────────
+        # ``partial: false`` tells the client that generation is done.  The
+        # editor should settle on this exact text regardless of any
+        # intermediate partial frames that may have arrived.
         if script:
             await manager.broadcast_to_room(room_id, {
-                "type": "update_editor_text",
-                "code": script,
+                "type":    "update_editor_text",
+                "code":    script,
+                "partial": False,
             })
 
     except Exception as exc:
