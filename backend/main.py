@@ -564,6 +564,18 @@ def _image_to_volumetric_points(image_url: str) -> list[dict[str, Any]] | None:
         z_front = Z_MAX * geo_z * (0.8 + 0.2 * color_z)
         z_back  = -Z_MAX * 0.65 * geo_z
 
+        # ── Layer quantization ─────────────────────────────────────────────
+        # Snap Z to discrete topographic slices so the geometry reads as
+        # clean stacked contours in CAD/point-cloud tools.
+        # Front: 10 layers spanning [0, Z_MAX]; step ≈ 0.20 units.
+        # Back:   6 layers spanning [0, -Z_MAX×0.65]; step ≈ 0.22 units.
+        N_FRONT, N_BACK = 10, 6
+        z_step_f = Z_MAX / N_FRONT
+        z_step_b = (Z_MAX * 0.65) / N_BACK
+        # Clamp to at least one layer so centroid points are never at z=0.
+        z_front = round(max(round(z_front / z_step_f), 1) * z_step_f, 3)
+        z_back  = round(-max(round(abs(z_back) / z_step_b), 1) * z_step_b, 3)
+
         color_front = (r << 16) | (g << 8) | b
         color_back  = (max(0, r - 64) << 16) | (max(0, g - 64) << 8) | max(0, b - 64)
 

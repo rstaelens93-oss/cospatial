@@ -377,6 +377,32 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
     }
   }, [sceneData]);
 
+  // ── XYZ point-cloud export ──────────────────────────────────────────────
+  const handleExportXYZ = useCallback(() => {
+    const pointObjects = customObjectsRef.current.filter(
+      (o) => o instanceof THREE.Points
+    ) as THREE.Points[];
+    if (pointObjects.length === 0) return;
+
+    const lines: string[] = [];
+    for (const pts of pointObjects) {
+      const pos = pts.geometry.getAttribute("position") as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        lines.push(
+          `${pos.getX(i).toFixed(4)} ${pos.getY(i).toFixed(4)} ${pos.getZ(i).toFixed(4)}`
+        );
+      }
+    }
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = "pointcloud.xyz";
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
   if (webglError) {
     return (
       <div
@@ -411,17 +437,61 @@ const ViewportPanel = forwardRef<ViewportPanelHandle, ViewportPanelProps>(
   }
 
   return (
-    <div
-      ref={mountRef}
-      data-testid="viewport-3d"
-      style={{
-        width: "100%",
-        height: "100%",
-        cursor: "grab",
-        background: "#0b1118",
-        touchAction: "none",  // let OrbitControls handle all touch events
-      }}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <div
+        ref={mountRef}
+        data-testid="viewport-3d"
+        style={{
+          width: "100%",
+          height: "100%",
+          cursor: "grab",
+          background: "#0b1118",
+          touchAction: "none",
+        }}
+      />
+      {/* Export overlay button */}
+      <button
+        onClick={handleExportXYZ}
+        title="Export all active coordinates as a standard .XYZ point cloud file"
+        style={{
+          position: "absolute",
+          bottom: "14px",
+          right: "14px",
+          background: "rgba(11, 17, 24, 0.78)",
+          backdropFilter: "blur(10px)",
+          WebkitBackdropFilter: "blur(10px)",
+          border: "1px solid rgba(0, 212, 255, 0.28)",
+          borderRadius: "8px",
+          color: "#7ee8fa",
+          fontSize: "11px",
+          fontFamily: "monospace",
+          fontWeight: 500,
+          padding: "7px 11px",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: "5px",
+          letterSpacing: "0.04em",
+          userSelect: "none",
+          zIndex: 10,
+          transition: "border-color 0.18s ease, background 0.18s ease, color 0.18s ease",
+        }}
+        onMouseEnter={(e) => {
+          const b = e.currentTarget;
+          b.style.background = "rgba(0, 212, 255, 0.12)";
+          b.style.borderColor = "rgba(0, 212, 255, 0.65)";
+          b.style.color = "#00d4ff";
+        }}
+        onMouseLeave={(e) => {
+          const b = e.currentTarget;
+          b.style.background = "rgba(11, 17, 24, 0.78)";
+          b.style.borderColor = "rgba(0, 212, 255, 0.28)";
+          b.style.color = "#7ee8fa";
+        }}
+      >
+        📥 Export Point Cloud (.XYZ)
+      </button>
+    </div>
   );
 });
 
