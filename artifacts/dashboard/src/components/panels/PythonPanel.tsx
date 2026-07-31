@@ -32,13 +32,27 @@ interface PythonPanelProps {
 
 export default function PythonPanel({ onSceneData, injectedCode }: PythonPanelProps) {
   const [code, setCode] = useState(DEFAULT_CODE);
+  // Direct handle to the Monaco editor instance — set in onMount.
+  // Calling editor.setValue() is the only reliable way to programmatically
+  // update content; relying solely on the value prop can miss updates when
+  // @monaco-editor/react's internal diff-check is stale or batched away.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const editorRef = useRef<any>(null);
 
   // Pre-fill the editor whenever the backend sends a new generated script.
-  // The Monaco editor's onChange handler still fires normally so the user
-  // can edit freely after injection.
   useEffect(() => {
-    if (injectedCode) setCode(injectedCode);
+    if (!injectedCode) return;
+    // 1. Keep React state in sync so handleRun() reads the new code.
+    setCode(injectedCode);
+    // 2. Drive the Monaco model directly — guaranteed to update the display.
+    if (editorRef.current) {
+      editorRef.current.setValue(injectedCode);
+      // Move cursor to line 1 col 1 so the user sees the top of the script.
+      editorRef.current.setPosition({ lineNumber: 1, column: 1 });
+      editorRef.current.revealLine(1);
+    }
   }, [injectedCode]);
+
   const [lastResult, setLastResult] = useState<CodeResult | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
 
@@ -133,6 +147,7 @@ export default function PythonPanel({ onSceneData, injectedCode }: PythonPanelPr
             });
           }}
           onMount={(editor, monaco) => {
+            editorRef.current = editor;
             monaco.editor.setTheme("dashboard-dark");
           }}
         />
